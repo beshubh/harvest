@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use harvest::crawler::Crawler;
 use harvest::db::{CrawlResultRepo, Database};
 
@@ -15,11 +17,13 @@ async fn main() -> anyhow::Result<()> {
     Database::init_global().await?;
     let crawl_results_repo = CrawlResultRepo::new(&Database::get());
 
-    let crawler = Crawler::new(1, crawl_results_repo);
+    let crawler = Crawler::new(5, crawl_results_repo, 10);
+    let crawler = Arc::new(crawler);
     let res = crawler.crawl("https://books.toscrape.com/".into()).await;
     match res {
         Ok(res) => println!("{:?}", res),
         Err(e) => println!("{:#}", e),
     }
+    futures::future::pending::<()>().await;
     Ok(())
 }
