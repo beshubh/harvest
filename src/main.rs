@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use harvest::crawler::Crawler;
-use harvest::db::{CrawlResultRepo, Database};
+use harvest::db::{PageRepo, Database};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -15,9 +15,11 @@ async fn main() -> anyhow::Result<()> {
     // tracing_log::LogTracer::init()?;
 
     Database::init_global().await?;
-    let crawl_results_repo = CrawlResultRepo::new(&Database::get());
-
-    let crawler = Crawler::new(5, crawl_results_repo, 10);
+    let pages_repo = PageRepo::new(&Database::get());
+    let max_depth = 5;
+    let max_concurrent_fetches = 150_usize;
+    let frontier_size = 500_usize;
+    let crawler = Crawler::new(max_depth, pages_repo, max_concurrent_fetches, frontier_size);
     let crawler = Arc::new(crawler);
     let res = crawler.crawl("https://books.toscrape.com/".into()).await;
     match res {

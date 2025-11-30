@@ -1,8 +1,8 @@
+use mongodb::bson::{DateTime, oid::ObjectId};
 use serde::{Deserialize, Serialize};
-use mongodb::bson::{oid::ObjectId, DateTime};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct CrawlResult {
+pub struct Page {
     #[serde(rename = "_id")]
     pub id: ObjectId,
 
@@ -16,7 +16,7 @@ pub struct CrawlResult {
     pub crawled_at: DateTime,
 }
 
-impl CrawlResult {
+impl Page {
     pub fn new(
         url: String,
         title: String,
@@ -24,8 +24,8 @@ impl CrawlResult {
         outgoing_links: Vec<String>,
         depth: u32,
         is_seed: bool,
-    ) -> CrawlResult {
-        CrawlResult {
+    ) -> Page {
+        Page {
             id: ObjectId::new(),
             url,
             title,

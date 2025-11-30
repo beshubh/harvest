@@ -1,21 +1,21 @@
 use anyhow::{Context, Result};
+use mongodb::options::ClientOptions;
 use mongodb::{
     Client, Collection, Database as MongoDatabase,
-    bson::{Document, doc, oid::ObjectId},
-    options::ClientOptions,
+    bson::{Document, doc, oid::ObjectId, to_document},
 };
 use once_cell::sync::OnceCell;
 use serde::{Serialize, de::DeserializeOwned};
 
 use crate::config::CONFIG;
-use crate::data_models::CrawlResult;
+use crate::data_models::Page;
 
 /// Global database instance
 static DB: OnceCell<Database> = OnceCell::new();
 
 /// Collection names as constants for consistency
 pub mod collections {
-    pub const CRAWL_RESULTS: &str = "crawl_results";
+    pub const PAGES: &str = "pages";
     // Add more collection names here as your project grows
     // pub const USERS: &str = "users";
 }
@@ -103,9 +103,9 @@ impl Database {
     // Collection accessors - add typed accessors for each collection
     // =========================================================================
 
-    /// Get the crawl_results collection
-    pub fn crawl_results(&self) -> Collection<CrawlResult> {
-        self.collection(collections::CRAWL_RESULTS)
+    /// Get the pages collection
+    pub fn pages(&self) -> Collection<Page> {
+        self.collection(collections::PAGES)
     }
 
     // Add more collection accessors as needed:
@@ -263,43 +263,61 @@ where
 }
 
 // =============================================================================
-// Convenience functions for CrawlResult collection
+// Convenience functions for Page collection
 // =============================================================================
 
 impl Database {
-    /// Get a repository for CrawlResult documents
-    pub fn crawl_results_repo(&self) -> Repository<CrawlResult> {
-        Repository::new(self.crawl_results())
+    /// Get a repository for Page documents
+    pub fn pages_repo(&self) -> Repository<Page> {
+        Repository::new(self.pages())
     }
 }
 
 // =============================================================================
-// CrawlResult-specific operations
+// Page-specific operations
 // =============================================================================
 
-/// Extended operations specific to CrawlResult collection
-pub struct CrawlResultRepo {
-    repo: Repository<CrawlResult>,
+/// Extended operations specific to Page collection
+pub struct PageRepo {
+    repo: Repository<Page>,
 }
 
-impl CrawlResultRepo {
+impl PageRepo {
     pub fn new(db: &Database) -> Self {
         Self {
-            repo: db.crawl_results_repo(),
+            repo: db.pages_repo(),
         }
     }
 
-    /// Insert a new crawl result
-    pub async fn insert(&self, result: &CrawlResult) -> Result<ObjectId> {
-        self.repo.insert(result).await
+    /// Insert a new page
+    pub async fn insert(&self, page: &Page) -> Result<ObjectId> {
+        self.repo.insert(page).await
     }
 
-    pub async fn insert_many(&self, results: &[CrawlResult]) -> Result<Vec<ObjectId>> {
-        self.repo.insert_many(results).await
+    pub async fn insert_many(&self, pages: &[Page]) -> Result<Vec<ObjectId>> {
+        self.repo.insert_many(pages).await
+    }
+
+    pub async fn upsert(&self, page: &Page) -> Result<ObjectId> {
+        let mut serialized = to_document(page)?;
+        // Remove _id from the update document - MongoDB doesn't allow updating immutable _id field
+        serialized.remove("_id");
+
+        if let Ok(Some(existing)) = self.find_by_url(&page.url).await {
+            self.repo
+                .collection
+                .update_one(doc! { "url": &page.url}, doc! {"$set": serialized})
+                .await
+                .context("failed to upsert document")?;
+            // Return the existing document's ID since this was an update
+            Ok(existing.id)
+        } else {
+            self.insert(page).await
+        }
     }
 
     /// Find by URL
-    pub async fn find_by_url(&self, url: &str) -> Result<Option<CrawlResult>> {
+    pub async fn find_by_url(&self, url: &str) -> Result<Option<Page>> {
         self.repo.find_one(doc! { "url": url }).await
     }
 
@@ -309,12 +327,12 @@ impl CrawlResultRepo {
     }
 
     /// Find all seed URLs
-    pub async fn find_seeds(&self) -> Result<Vec<CrawlResult>> {
+    pub async fn find_seeds(&self) -> Result<Vec<Page>> {
         self.repo.find(doc! { "is_seed": true }).await
     }
 
     /// Find by depth
-    pub async fn find_by_depth(&self, depth: u32) -> Result<Vec<CrawlResult>> {
+    pub async fn find_by_depth(&self, depth: u32) -> Result<Vec<Page>> {
         self.repo.find(doc! { "depth": depth }).await
     }
 
@@ -329,13 +347,13 @@ impl CrawlResultRepo {
         Ok(result.deleted_count > 0)
     }
 
-    /// List all crawl results
-    pub async fn list_all(&self) -> Result<Vec<CrawlResult>> {
+    /// List all pages
+    pub async fn list_all(&self) -> Result<Vec<Page>> {
         self.repo.find_all().await
     }
 
     /// Find by ID
-    pub async fn find_by_id(&self, id: ObjectId) -> Result<Option<CrawlResult>> {
+    pub async fn find_by_id(&self, id: ObjectId) -> Result<Option<Page>> {
         self.repo.find_by_id(id).await
     }
 
@@ -344,7 +362,7 @@ impl CrawlResultRepo {
         self.repo.delete_by_id(id).await
     }
 
-    /// Update crawl result
+    /// Update page
     pub async fn update(&self, id: ObjectId, update: Document) -> Result<bool> {
         self.repo.update_by_id(id, update).await
     }
@@ -399,12 +417,12 @@ mod tests {
     use test_utils::*;
 
     #[tokio::test]
-    async fn test_crawl_result_crud() -> Result<()> {
+    async fn test_page_crud() -> Result<()> {
         let (db, db_name) = create_test_db().await?;
-        let repo = CrawlResultRepo::new(&db);
+        let repo = PageRepo::new(&db);
 
         // Create
-        let result = CrawlResult::new(
+        let page = Page::new(
             "https://example.com".to_string(),
             "Example".to_string(),
             "<html></html>".to_string(),
@@ -413,7 +431,7 @@ mod tests {
             true,
         );
 
-        let id = repo.insert(&result).await?;
+        let id = repo.insert(&page).await?;
 
         // Read
         let found = repo.find_by_id(id).await?;
