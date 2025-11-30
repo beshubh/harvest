@@ -11,6 +11,7 @@ use tokio::sync::mpsc;
 
 use crate::data_models::Page;
 use crate::db::PageRepo;
+use crate::scrapper::Scrapper;
 
 const MAX_FETCH_RETRIES: usize = 4;
 
@@ -23,6 +24,7 @@ pub struct Crawler {
     fetched_tx: mpsc::UnboundedSender<Page>,
     fetched_rx: Mutex<mpsc::UnboundedReceiver<Page>>,
     concurrency_semaphore: Arc<Semaphore>,
+    scrapper: Arc<Scrapper>,
 }
 
 impl Crawler {
@@ -31,25 +33,29 @@ impl Crawler {
         pages_repo: PageRepo,
         max_concurrent_fetches: usize,
         frontier_size: usize,
+        max_concurrent_scraps: usize,
     ) -> Crawler {
         let (crawl_tx, crawl_rx) = mpsc::channel(frontier_size);
         let (fetched_tx, fetched_rx) = mpsc::unbounded_channel();
 
+        let pages_repo = Arc::new(pages_repo);
         Crawler {
             visited_urls: DashSet::new(),
             max_depth,
-            pages_repo: Arc::new(pages_repo),
+            pages_repo: pages_repo.clone(),
             crawl_tx: crawl_tx.clone(),
             crawl_rx: Mutex::new(crawl_rx),
             fetched_tx: fetched_tx.clone(),
             fetched_rx: Mutex::new(fetched_rx),
             concurrency_semaphore: Arc::new(Semaphore::new(max_concurrent_fetches)),
+            scrapper: Arc::new(Scrapper::new(max_concurrent_scraps, pages_repo.clone())),
         }
     }
 
     pub async fn crawl(self: Arc<Self>, starting_url: String) -> Result<()> {
         self.clone().spawn_crawler(starting_url, 0).await.unwrap();
         self.clone().spawn_mongo_inserter().await;
+        self.clone().scrapper.clone().spin().await?;
         Ok(())
     }
 
@@ -142,8 +148,10 @@ impl Crawler {
             let mut rx = self_clone.fetched_rx.lock().await;
             while let Some(page) = rx.recv().await {
                 match self_clone.pages_repo.upsert(&page).await {
-                    Ok(id) => {
-                        log::info!("upserted to mongo db: {:?}", id)
+                    Ok(_) => {
+                        if let Err(e) = self_clone.scrapper.scrap_tx.send(page) {
+                            log::error!("error sending page to scrapper, error: {:#}", e);
+                        }
                     }
                     Err(e) => {
                         log::error!("error inserting to mongo, error: {:#}", e);

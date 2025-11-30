@@ -9,8 +9,8 @@ pub struct Page {
     pub url: String,
     pub title: String,
     pub html_body: String,
+    pub cleaned_content: String,
     pub outgoing_links: Vec<String>,
-
     pub depth: u32,
     pub is_seed: bool,
     pub crawled_at: DateTime,
@@ -31,6 +31,7 @@ impl Page {
             title,
             html_body,
             outgoing_links,
+            cleaned_content: "".to_string(), // will be populated later by scrapper.
             depth,
             is_seed,
             crawled_at: DateTime::now(),

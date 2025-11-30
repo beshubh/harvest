@@ -302,8 +302,8 @@ impl PageRepo {
         let mut serialized = to_document(page)?;
         // Remove _id from the update document - MongoDB doesn't allow updating immutable _id field
         serialized.remove("_id");
-
-        if let Ok(Some(existing)) = self.find_by_url(&page.url).await {
+        let exists = self.find_by_url(&page.url).await?;
+        if let Some(existing) = exists {
             self.repo
                 .collection
                 .update_one(doc! { "url": &page.url}, doc! {"$set": serialized})
