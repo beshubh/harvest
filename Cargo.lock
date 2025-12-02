@@ -694,8 +694,10 @@ dependencies = [
  "dotenvy",
  "futures",
  "html2text",
+ "html5ever 0.36.1",
  "lazy_static",
  "log",
+ "markup5ever_rcdom",
  "mongodb",
  "once_cell",
  "porter-stemmer",
@@ -1240,6 +1242,18 @@ dependencies = [
  "log",
  "tendril",
  "web_atoms 0.2.0",
+]
+
+[[package]]
+name = "markup5ever_rcdom"
+version = "0.36.0+unofficial"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3e5fc8802e8797c0dfdd2ce5c21aa0aee21abbc7b3b18559100651b3352a7b63"
+dependencies = [
+ "html5ever 0.36.1",
+ "markup5ever 0.36.1",
+ "tendril",
+ "xml5ever",
 ]
 
 [[package]]
@@ -3194,6 +3208,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "05f360fc0b24296329c78fda852a1e9ae82de9cf7b27dae4b7f62f118f77b9ed"
 dependencies = [
  "tap",
+]
+
+[[package]]
+name = "xml5ever"
+version = "0.36.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f57dd51b88a4b9f99f9b55b136abb86210629d61c48117ddb87f567e51e66be7"
+dependencies = [
+ "log",
+ "markup5ever 0.36.1",
 ]
 
 [[package]]

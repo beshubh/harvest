@@ -16,13 +16,13 @@ async fn main() -> anyhow::Result<()> {
 
     Database::init_global().await?;
     let pages_repo = PageRepo::new(&Database::get());
-    let max_depth = 5;
+    let max_depth = 0;
     let max_concurrent_fetches = 150_usize;
     let frontier_size = 500_usize;
     let max_concurrent_scraps = 200_usize;
     let crawler = Crawler::new(max_depth, pages_repo, max_concurrent_fetches, frontier_size, max_concurrent_scraps);
     let crawler = Arc::new(crawler);
-    let res = crawler.crawl("https://books.toscrape.com/".into()).await;
+    let res = crawler.crawl("https://karpathy.ai/".into()).await;
     match res {
         Ok(res) => println!("{:?}", res),
         Err(e) => println!("{:#}", e),

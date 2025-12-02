@@ -209,6 +209,6 @@ impl Crawler {
             .map(|t| t.text().collect::<String>().trim().to_string());
         let body = body.unwrap_or_else(|| "".to_string());
 
-        Ok((title, body, seen))
+        Ok((title, html.to_string(), seen))
     }
 }

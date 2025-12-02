@@ -1,5 +1,7 @@
 use anyhow::Result;
-use html2text::from_read;
+use html5ever::parse_document;
+use html5ever::tendril::TendrilSink;
+use markup5ever_rcdom::{Handle, NodeData, RcDom};
 use porter_stemmer::stem;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -11,7 +13,7 @@ use tokio::sync::mpsc;
 use crate::data_models::Page;
 use crate::db::PageRepo;
 
-// 1. Define Static Sets so we don't rebuild them for every single page
+#[allow(dead_code)]
 static STOP_WORDS: OnceLock<HashSet<String>> = OnceLock::new();
 static JS_WORDS: OnceLock<HashSet<&'static str>> = OnceLock::new();
 
@@ -126,13 +128,65 @@ impl Scrapper {
         Ok(page)
     }
 
+    fn walk(handle: &Handle) -> String {
+        let node = handle;
+        let mut text = String::new();
+        match &node.data {
+            NodeData::Text { contents } => {
+                let _text = contents.borrow();
+                // Collapse whitespace if you like:
+                let s = _text.trim();
+                if !s.is_empty() {
+                    text.push_str(s);
+                }
+            }
+            NodeData::Element { name, .. } => {
+                // For some block-level elements, you can print a newline
+                let local = &name.local;
+                if &**local == "p" || &**local == "div" || &**local == "br" {
+                    text.push('\n');
+                }
+            }
+            _ => {}
+        }
+
+        for child in node.children.borrow().iter() {
+            text.push_str(&Self::walk(child));
+            text.push('\n');
+        }
+        return text;
+    }
+
+    fn compress_whitespaces(text: &str) -> String {
+        let mut result = Vec::new();
+        let mut last_was_blank = false;
+        for line in text.lines() {
+            let trimmed = line.trim();
+            if trimmed.trim().is_empty() {
+                if !last_was_blank {
+                    // result.push(String::new());
+                    last_was_blank = true;
+                }
+            } else {
+                result.push(trimmed.to_string());
+                last_was_blank = true;
+            }
+        }
+        result.join("\n")
+    }
+
     fn process_and_tokenize(raw_html: &str) -> Result<Vec<String>> {
         // strips html tags
         // removes stop words
         // tokenizes
-        let content = raw_html;
-        let content = from_read(content.as_bytes(), 80)?;
-        let stop_words = get_stop_words();
+        let dom = parse_document(RcDom::default(), Default::default())
+            .from_utf8()
+            .read_from(&mut std::io::Cursor::new(raw_html.as_bytes()))
+            .unwrap();
+
+        let content = Self::walk(&dom.document);
+        let content = Self::compress_whitespaces(&content);
+        // let stop_words = get_stop_words();
         let javascript_words = get_js_words();
 
         let tokens = content
@@ -148,9 +202,9 @@ impl Scrapper {
                     return false;
                 }
 
-                if stop_words.contains(w) {
-                    return false;
-                }
+                // if stop_words.contains(w) {
+                //     return false;
+                // }
                 if javascript_words.contains(w.as_str()) {
                     return false;
                 }
@@ -164,5 +218,32 @@ impl Scrapper {
     fn stem_words(content: Vec<String>) -> String {
         let stemmed_words = content.iter().map(|w| stem(w)).collect::<Vec<String>>();
         stemmed_words.join(" ")
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_compress_whitespaces() {
+        let input = "\n\n\n\n\n\n\n\n\n";
+        let output = Scrapper::compress_whitespaces(input);
+        assert_eq!(output, "");
+    }
+
+    #[test]
+    fn test_compress_whitespaces2() {
+        let input = "something\n\n\n\n else is going one\n\n\n\n\n\n\n\n\n\nsomething                  ";
+        let output = Scrapper::compress_whitespaces(input);
+        assert_eq!(output, "something\nelse is going one\nsomething");
+    }
+
+    #[test]
+    fn test_something() {
+        let mut a = Vec::new();
+        a.push(String::new());
+        assert_eq!("", String::new());
     }
 }
