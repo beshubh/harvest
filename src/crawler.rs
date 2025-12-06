@@ -9,9 +9,9 @@ use tokio::sync::Mutex;
 use tokio::sync::Semaphore;
 use tokio::sync::mpsc;
 
+use crate::analyzer::Analyzer;
 use crate::data_models::Page;
 use crate::db::PageRepo;
-use crate::scrapper::Scrapper;
 
 const MAX_FETCH_RETRIES: usize = 4;
 
@@ -24,7 +24,7 @@ pub struct Crawler {
     fetched_tx: mpsc::UnboundedSender<Page>,
     fetched_rx: Mutex<mpsc::UnboundedReceiver<Page>>,
     concurrency_semaphore: Arc<Semaphore>,
-    scrapper: Arc<Scrapper>,
+    text_analyzer: Arc<Analyzer>,
 }
 
 impl Crawler {
@@ -48,14 +48,23 @@ impl Crawler {
             fetched_tx: fetched_tx.clone(),
             fetched_rx: Mutex::new(fetched_rx),
             concurrency_semaphore: Arc::new(Semaphore::new(max_concurrent_fetches)),
-            scrapper: Arc::new(Scrapper::new(max_concurrent_scraps, pages_repo.clone())),
+            text_analyzer: Arc::new(Analyzer::new(
+                vec![Box::new(crate::analyzer::HTMLTagFilter::default())],
+                Box::new(crate::analyzer::WhiteSpaceTokenizer),
+                vec![
+                    Box::new(crate::analyzer::StopWordTokenFilter),
+                    Box::new(crate::analyzer::PorterStemmerTokenFilter),
+                ],
+                max_concurrent_scraps,
+                pages_repo.clone(),
+            )),
         }
     }
 
     pub async fn crawl(self: Arc<Self>, starting_url: String) -> Result<()> {
         self.clone().spawn_crawler(starting_url, 0).await.unwrap();
         self.clone().spawn_mongo_inserter().await;
-        self.clone().scrapper.clone().spin().await?;
+        self.clone().text_analyzer.clone().spin()?;
         Ok(())
     }
 
@@ -149,7 +158,7 @@ impl Crawler {
             while let Some(page) = rx.recv().await {
                 match self_clone.pages_repo.upsert(&page).await {
                     Ok(_) => {
-                        if let Err(e) = self_clone.scrapper.scrap_tx.send(page) {
+                        if let Err(e) = self_clone.text_analyzer.analyze_tx.send(page) {
                             log::error!("error sending page to scrapper, error: {:#}", e);
                         }
                     }
@@ -179,7 +188,6 @@ impl Crawler {
         // TODO: handle errors
         let href_selector = Selector::parse("a").unwrap();
         let title_selector = Selector::parse("title").unwrap();
-        let body_selector = Selector::parse("body").unwrap();
 
         // extract links
         let hrefs = document.select(&href_selector);
@@ -197,17 +205,11 @@ impl Crawler {
             }
         }
 
-        // extract title and body;
         let title = document
             .select(&title_selector)
             .next()
             .map(|t| t.text().collect::<String>().trim().to_string());
         let title = title.unwrap_or_else(|| "".to_string());
-        let body = document
-            .select(&body_selector)
-            .next()
-            .map(|t| t.text().collect::<String>().trim().to_string());
-        let body = body.unwrap_or_else(|| "".to_string());
 
         Ok((title, html.to_string(), seen))
     }
