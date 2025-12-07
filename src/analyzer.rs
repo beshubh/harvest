@@ -14,8 +14,9 @@ use tokio::sync::mpsc;
 use crate::data_models::Page;
 use crate::db::PageRepo;
 
-#[allow(dead_code)]
 static STOP_WORDS: OnceLock<HashSet<String>> = OnceLock::new();
+
+#[allow(dead_code)]
 static JS_WORDS: OnceLock<HashSet<&'static str>> = OnceLock::new();
 
 fn get_stop_words() -> &'static HashSet<String> {
@@ -27,6 +28,7 @@ fn get_stop_words() -> &'static HashSet<String> {
     })
 }
 
+#[allow(dead_code)]
 fn get_js_words() -> &'static HashSet<&'static str> {
     JS_WORDS.get_or_init(|| {
         HashSet::from([
@@ -83,7 +85,7 @@ fn get_js_words() -> &'static HashSet<&'static str> {
 }
 
 #[derive(Clone, Default, Debug)]
-struct ExtractedText {
+pub struct ExtractedText {
     title: String,
     headings: Vec<String>,
     body: String,
@@ -91,7 +93,7 @@ struct ExtractedText {
 }
 
 #[derive(Debug, Clone, PartialEq, Copy)]
-enum Context {
+pub enum Context {
     Title,
     Heading,
     Anchor,
@@ -110,7 +112,7 @@ pub trait CharacterFilter: Send + Sync {
 pub struct HTMLTagFilter;
 
 impl HTMLTagFilter {
-    fn get_dom(html: &str) -> RcDom {
+    pub fn get_dom(html: &str) -> RcDom {
         let dom = parse_document(RcDom::default(), Default::default())
             .from_utf8()
             .read_from(&mut std::io::Cursor::new(html))
@@ -118,7 +120,7 @@ impl HTMLTagFilter {
         dom
     }
 
-    fn has_boilerplate_class_or_id(attrs: &RefCell<Vec<Attribute>>) -> bool {
+    pub fn has_boilerplate_class_or_id(attrs: &RefCell<Vec<Attribute>>) -> bool {
         use std::borrow::Cow;
         for attr in attrs.borrow().iter() {
             let value: Cow<str> = attr.value.to_string().into();
@@ -141,14 +143,14 @@ impl HTMLTagFilter {
         false
     }
 
-    fn is_block_like(local: &LocalName) -> bool {
+    pub fn is_block_like(local: &LocalName) -> bool {
         matches!(
             &**local,
             "p" | "div" | "section" | "article" | "li" | "ul" | "ol" | "header" | "footer"
         )
     }
 
-    fn walk_html(handle: &Handle, ctx: Context, out: &mut ExtractedText) {
+    pub fn walk_html(handle: &Handle, ctx: Context, out: &mut ExtractedText) {
         let node = handle;
         let mut text = String::new();
         match &node.data {
@@ -247,6 +249,7 @@ impl HTMLTagFilter {
         }
     }
 
+    #[allow(dead_code)]
     fn compress_whitespaces(text: &str) -> String {
         let mut result = Vec::new();
         let mut last_was_blank = false;
@@ -299,6 +302,14 @@ impl Tokenizer for WhiteSpaceTokenizer {
 /// and a synonym token filter introduces synonyms into the token stream.
 pub trait TokenFilter: Send + Sync {
     fn filter(&self, tokens: Vec<String>) -> Vec<String>;
+}
+
+pub struct LowerCaseTokenFilter;
+
+impl TokenFilter for LowerCaseTokenFilter {
+    fn filter(&self, tokens: Vec<String>) -> Vec<String> {
+        tokens.iter().map(|w| w.to_lowercase()).collect::<Vec<String>>()
+    }
 }
 
 pub struct StopWordTokenFilter;
@@ -418,4 +429,31 @@ mod tests {
         a.push(String::new());
         assert_eq!("", String::new());
     }
+
+    #[test]
+    fn test_html_tag_filter() {
+        let html = "<html><head><title>Hello World</title></head><body><h1>Hello World</h1><p>This is a test</p></body></html>";
+        let filter = HTMLTagFilter;
+        let filtered = filter.filter(html.into());
+        assert_eq!("\n This is a test", &filtered);
+    }
+
+    #[test]
+    fn test_html_tag_filter_extracted_content() {
+        let html = r#"<html><head><title>New World Order</title></head><body><h1>Hello World</h1><p>This is a test</p>
+            <h1>New Heading</h1>
+            <p>Some other content</p>
+            <script>alert('Hello World')</script>
+            <a href="https://www.google.com">Link to Google</a>
+            </body></html>"#;
+        let dom = HTMLTagFilter::get_dom(html);
+        let mut extracted = ExtractedText::default();
+        HTMLTagFilter::walk_html(&dom.document, Context::Body, &mut extracted);
+        assert_eq!("New World Order", &extracted.title);
+        assert_eq!("Hello World", &extracted.headings[0]);
+        assert_eq!("New Heading", &extracted.headings[1]);
+        assert_eq!("Link to Google", &extracted.anchors[0]);
+        assert_eq!("\n This is a test \n Some other content ", &extracted.body);
+    }
+
 }
