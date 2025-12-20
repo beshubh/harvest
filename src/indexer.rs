@@ -340,32 +340,41 @@ impl Indexer {
             streamers.push(cursor);
         }
 
-        let mut min_terms: BinaryHeap<Reverse<(String, usize)>> = BinaryHeap::new();
+        let mut min_terms: BinaryHeap<Reverse<HeapItem>> = BinaryHeap::new();
 
         for (idx, streamer) in streamers.iter_mut().enumerate() {
             if streamer.has_next() {
                 let e = streamer.next().await.unwrap().unwrap();
-                min_terms.push(Reverse((e.term, idx)));
+                min_terms.push(Reverse(HeapItem {
+                    term: e.term.clone(),
+                    streamer_idx: idx,
+                    doc: e,
+                }));
             }
         }
 
         let mut terms_merged = 0;
         let mut docs_written = 0;
 
-        while let Some(Reverse((current_term, idx))) = min_terms.pop() {
-            let cursor = &mut streamers[idx];
-            let mut current_postings = vec![];
+        while let Some(Reverse(item)) = min_terms.pop() {
+            let cursor = &mut streamers[item.streamer_idx];
+            let mut current_postings = item.doc.postings;
             while let Some(spimi_doc) = cursor.next().await {
                 let doc = spimi_doc.unwrap();
-                if doc.term != current_term {
-                    min_terms.push(Reverse((doc.term, idx)));
+                if doc.term != item.term {
+                    min_terms.push(Reverse(HeapItem {
+                        term: doc.term.clone(),
+                        streamer_idx: item.streamer_idx,
+                        doc,
+                    }));
                     break;
                 }
+
                 let postings = doc.postings;
                 let result_postings = merge_sorted_lists(&current_postings, &postings);
                 current_postings = result_postings;
                 if current_postings.len() >= DOCIDS_PER_MONGO_DOCUMENT {
-                    let doc = InvertedIndexDoc::new(current_term.clone(), current_postings.clone());
+                    let doc = InvertedIndexDoc::new(item.term.clone(), current_postings.clone());
                     self.db
                         .collection::<InvertedIndexDoc>("inverted_index")
                         .insert_one(doc)
@@ -376,7 +385,7 @@ impl Indexer {
                 }
             }
             if current_postings.len() > 0 {
-                let doc = InvertedIndexDoc::new(current_term.clone(), current_postings.clone());
+                let doc = InvertedIndexDoc::new(item.term.clone(), current_postings.clone());
                 self.db
                     .collection::<InvertedIndexDoc>("inverted_index")
                     .insert_one(doc)
@@ -403,6 +412,36 @@ impl Indexer {
         log::info!("Indexing complete! Safe to quit now.");
 
         Ok(())
+    }
+}
+
+struct HeapItem {
+    term: String,
+    streamer_idx: usize,
+    doc: SpimiDoc,
+}
+
+impl PartialEq for HeapItem {
+    fn eq(&self, other: &Self) -> bool {
+        self.term == other.term && self.streamer_idx == other.streamer_idx
+    }
+}
+
+impl Eq for HeapItem {}
+
+impl PartialOrd for HeapItem {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for HeapItem {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // min-heap: reverse the whole ordering
+        other
+            .term
+            .cmp(&self.term)
+            .then_with(|| other.streamer_idx.cmp(&self.streamer_idx))
     }
 }
 
