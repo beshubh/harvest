@@ -308,7 +308,10 @@ pub struct LowerCaseTokenFilter;
 
 impl TokenFilter for LowerCaseTokenFilter {
     fn filter(&self, tokens: Vec<String>) -> Vec<String> {
-        tokens.iter().map(|w| w.to_lowercase()).collect::<Vec<String>>()
+        tokens
+            .iter()
+            .map(|w| w.to_lowercase())
+            .collect::<Vec<String>>()
     }
 }
 
@@ -346,7 +349,7 @@ impl Analyzer {
         char_filters: Vec<Box<dyn CharacterFilter>>,
         tokenizer: Box<dyn Tokenizer>,
         token_filters: Vec<Box<dyn TokenFilter>>,
-        max_concurrent_analysiss: usize,
+        max_concurrent_analysis: usize,
         pages_repo: Arc<PageRepo>,
     ) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
@@ -356,7 +359,7 @@ impl Analyzer {
             token_filters,
             analyze_tx: tx,
             analyze_rx: Mutex::new(rx),
-            concurrent_analysis: Arc::new(Semaphore::new(max_concurrent_analysiss)),
+            concurrent_analysis: Arc::new(Semaphore::new(max_concurrent_analysis)),
             pages_repo,
         }
     }
@@ -455,5 +458,4 @@ mod tests {
         assert_eq!("Link to Google", &extracted.anchors[0]);
         assert_eq!("\n This is a test \n Some other content ", &extracted.body);
     }
-
 }

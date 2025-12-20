@@ -14,6 +14,7 @@ use crate::data_models::Page;
 use crate::db::PageRepo;
 
 const MAX_FETCH_RETRIES: usize = 4;
+const MAX_DOCUMENT_SIZE_BYTES: usize = 15 * 1024 * 1024; // 15 MB (leaving margin for MongoDB's 16MB limit)
 
 pub struct Crawler {
     visited_urls: DashSet<String>,
@@ -33,7 +34,7 @@ impl Crawler {
         pages_repo: PageRepo,
         max_concurrent_fetches: usize,
         frontier_size: usize,
-        max_concurrent_scraps: usize,
+        max_concurrent_analysis: usize,
     ) -> Crawler {
         let (crawl_tx, crawl_rx) = mpsc::channel(frontier_size);
         let (fetched_tx, fetched_rx) = mpsc::unbounded_channel();
@@ -55,7 +56,7 @@ impl Crawler {
                     Box::new(crate::analyzer::StopWordTokenFilter),
                     Box::new(crate::analyzer::PorterStemmerTokenFilter),
                 ],
-                max_concurrent_scraps,
+                max_concurrent_analysis,
                 pages_repo.clone(),
             )),
         }
@@ -98,10 +99,20 @@ impl Crawler {
                 return;
             }
             let html = html.unwrap();
+
+            let estimated_size = html.len() + url.len();
+            if estimated_size > MAX_DOCUMENT_SIZE_BYTES {
+                log::warn!(
+                    "skipping url {} - document too large ({} bytes)",
+                    url,
+                    estimated_size
+                );
+                return;
+            }
+
             let res = self_clone.parse_html(&url, &html).await;
             match res {
                 Ok((title, body, seen)) => {
-                    // send fetched to be inserted to mongo.
                     let page = Page::new(
                         url.clone(),
                         title,

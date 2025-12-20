@@ -66,10 +66,6 @@ impl PageExt for Page {
 
 use test_helpers::*;
 
-// =============================================================================
-// Indexer::new tests
-// =============================================================================
-
 #[tokio::test]
 async fn test_indexer_new_creates_valid_instance() -> Result<()> {
     let (db, db_name) = create_test_db().await?;
@@ -93,10 +89,7 @@ async fn test_indexer_new_with_different_page_limits() -> Result<()> {
     Ok(())
 }
 
-// =============================================================================
 // Indexer::pages_to_token_stream tests
-// =============================================================================
-
 #[tokio::test]
 async fn test_pages_to_token_stream_single_page_single_term() -> Result<()> {
     let (db, db_name) = create_test_db().await?;
@@ -242,10 +235,7 @@ async fn test_pages_to_token_stream_handles_extra_whitespace() -> Result<()> {
     Ok(())
 }
 
-// =============================================================================
 // Indexer::spimi_invert tests
-// =============================================================================
-
 #[tokio::test]
 async fn test_spimi_invert_empty_token_stream() -> Result<()> {
     let (db, db_name) = create_test_db().await?;
@@ -346,9 +336,7 @@ async fn test_spimi_invert_triggers_flush_on_budget_exceeded() -> Result<()> {
     Ok(())
 }
 
-// =============================================================================
 // Indexer::persist_block_to_disk tests
-// =============================================================================
 
 #[tokio::test]
 async fn test_persist_block_to_disk_empty_block() -> Result<()> {
@@ -465,10 +453,7 @@ async fn test_persist_block_to_disk_verifies_data_stored() -> Result<()> {
     Ok(())
 }
 
-// =============================================================================
 // Indexer::spin_indexer tests
-// =============================================================================
-
 #[tokio::test]
 async fn test_spin_indexer_with_no_pages() -> Result<()> {
     let (db, db_name) = create_test_db().await?;
@@ -524,10 +509,7 @@ async fn test_spin_indexer_pagination() -> Result<()> {
     Ok(())
 }
 
-// =============================================================================
-// merge_sorted_lists tests (additional edge cases)
-// =============================================================================
-
+// merge_sorted_lists tests
 #[test]
 fn test_merge_sorted_lists_with_object_ids() {
     let id1 = ObjectId::parse_str("000000000000000000000001").unwrap();
@@ -564,10 +546,7 @@ fn test_merge_sorted_lists_all_same_elements() {
     assert_eq!(result, vec![5, 5, 5, 5, 5, 5, 5]);
 }
 
-// =============================================================================
 // SpimiBlock tests
-// =============================================================================
-
 #[test]
 fn test_spimi_block_creation() {
     let mut dictionary = HashMap::new();
@@ -597,10 +576,7 @@ fn test_spimi_block_with_multiple_postings() {
     assert_eq!(block.dictionary.get("popular_term").unwrap().len(), 10);
 }
 
-// =============================================================================
 // Token tests
-// =============================================================================
-
 #[test]
 fn test_token_creation() {
     let doc_id = ObjectId::new();
