@@ -38,3 +38,39 @@ impl Page {
         }
     }
 }
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct SpimiDoc {
+    #[serde(rename = "_id")]
+    pub id: ObjectId,
+    pub term: String,
+    pub postings: Vec<ObjectId>,
+}
+
+impl SpimiDoc {
+    pub fn new(term: String, postings: Vec<ObjectId>) -> SpimiDoc {
+        SpimiDoc {
+            id: ObjectId::new(),
+            term,
+            postings,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct InvertedIndexDoc {
+    #[serde(rename = "_id")]
+    pub id: ObjectId,
+    term: String,
+    postings: Vec<ObjectId>,
+}
+
+impl InvertedIndexDoc {
+    pub fn new(term: String, postings: Vec<ObjectId>) -> InvertedIndexDoc {
+        InvertedIndexDoc {
+            id: ObjectId::new(),
+            term,
+            postings,
+        }
+    }
+}

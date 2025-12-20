@@ -352,6 +352,40 @@ impl PageRepo {
         self.repo.find_all().await
     }
 
+    /// List pages using cursor pagination
+    pub async fn list_paginated(
+        &self,
+        limit: i64,
+        last_cursor: Option<ObjectId>,
+    ) -> Result<(Vec<Page>, Option<ObjectId>)> {
+        let limit = limit.max(1);
+        let filter = if let Some(cursor) = last_cursor {
+            doc! { "_id": {"$gt": cursor}}
+        } else {
+            doc! {}
+        };
+        let limit = Some(limit);
+        let options = mongodb::options::FindOptions::builder()
+            .sort(doc! { "_id": 1})
+            .limit(limit)
+            .build();
+        let cursor = self
+            .repo
+            .collection
+            .find(filter)
+            .with_options(options)
+            .await
+            .context("failed to list pages with cursor pagination")?;
+
+        use futures::stream::TryStreamExt;
+        let pages: Vec<Page> = cursor
+            .try_collect()
+            .await
+            .context("failed to collect paginated pages")?;
+        let next_cursor = pages.last().map(|p| p.id);
+        Ok((pages, next_cursor))
+    }
+
     /// Find by ID
     pub async fn find_by_id(&self, id: ObjectId) -> Result<Option<Page>> {
         self.repo.find_by_id(id).await
