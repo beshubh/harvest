@@ -390,76 +390,96 @@ impl TokenFilter for NumericTokenFilter {
     }
 }
 
-pub struct Analyzer {
+/// Pure text analysis pipeline - no async, no DB, just text transformations
+pub struct TextAnalyzer {
     char_filters: Vec<Box<dyn CharacterFilter>>,
     tokenizer: Box<dyn Tokenizer>,
     token_filters: Vec<Box<dyn TokenFilter>>,
-
-    pub analyze_tx: mpsc::UnboundedSender<Page>,
-    analyze_rx: Mutex<mpsc::UnboundedReceiver<Page>>,
-    concurrent_analysis: Arc<Semaphore>,
-    pages_repo: Arc<PageRepo>,
 }
 
-impl Analyzer {
+impl TextAnalyzer {
     pub fn new(
         char_filters: Vec<Box<dyn CharacterFilter>>,
         tokenizer: Box<dyn Tokenizer>,
         token_filters: Vec<Box<dyn TokenFilter>>,
-        max_concurrent_analysis: usize,
-        pages_repo: Arc<PageRepo>,
     ) -> Self {
-        let (tx, rx) = mpsc::unbounded_channel();
         Self {
             char_filters,
             tokenizer,
             token_filters,
-            analyze_tx: tx,
-            analyze_rx: Mutex::new(rx),
-            concurrent_analysis: Arc::new(Semaphore::new(max_concurrent_analysis)),
+        }
+    }
+
+    /// Analyzes raw content and returns a list of tokens
+    pub fn analyze(&self, raw_content: String) -> Result<Vec<String>> {
+        // Character filtering
+        let mut content = raw_content;
+        for filter in self.char_filters.iter() {
+            content = filter.filter(content);
+        }
+
+        // Tokenization
+        let mut tokens = self.tokenizer.tokenize(content);
+
+        // Token filtering
+        for filter in self.token_filters.iter() {
+            tokens = filter.filter(tokens);
+        }
+
+        Ok(tokens)
+    }
+}
+
+/// Handles async page processing queue and database persistence
+pub struct PageProcessor {
+    pub process_tx: mpsc::UnboundedSender<Page>,
+    process_rx: Mutex<mpsc::UnboundedReceiver<Page>>,
+    concurrent_processing: Arc<Semaphore>,
+    pages_repo: Arc<PageRepo>,
+    text_analyzer: TextAnalyzer,
+}
+
+impl PageProcessor {
+    pub fn new(
+        text_analyzer: TextAnalyzer,
+        max_concurrent_processing: usize,
+        pages_repo: Arc<PageRepo>,
+    ) -> Self {
+        let (tx, rx) = mpsc::unbounded_channel();
+        Self {
+            text_analyzer,
+            process_tx: tx,
+            process_rx: Mutex::new(rx),
+            concurrent_processing: Arc::new(Semaphore::new(max_concurrent_processing)),
             pages_repo,
         }
     }
 
+    /// Spins up the async processing loop
     pub fn spin(self: Arc<Self>) -> Result<()> {
         let self_clone = self.clone();
         tokio::spawn(async move {
-            let mut analyze_rx = self_clone.analyze_rx.lock().await;
-            let semaphore = self_clone.concurrent_analysis.clone();
-            while let Some(data) = analyze_rx.recv().await {
-                let permit = semaphore.acquire().await.unwrap();
-                let self_clone = self_clone.clone();
+            let mut process_rx = self_clone.process_rx.lock().await;
+            while let Some(page) = process_rx.recv().await {
+                let self_for_task = self_clone.clone();
                 tokio::spawn(async move {
-                    let page = self_clone.clone().process(data);
-                    if let Ok(page) = page {
-                        if let Err(e) = self_clone.pages_repo.upsert(&page).await {
-                            eprintln!("Error upserting page after scrapping: {}", e);
+                    let permit = self_for_task.concurrent_processing.acquire().await.unwrap();
+                    if let Ok(processed_page) = self_for_task.process_page(page) {
+                        if let Err(e) = self_for_task.pages_repo.upsert(&processed_page).await {
+                            eprintln!("Error upserting page after processing: {}", e);
                         }
                     }
+                    drop(permit);
                 });
-                drop(permit);
             }
         });
         Ok(())
     }
 
-    fn process(self: Arc<Self>, mut page: Page) -> Result<Page> {
-        //character filtering
-        let mut content = page.html_body.clone();
-        for filter in self.char_filters.iter() {
-            content = filter.filter(content);
-        }
-
-        // tokenization
-        let mut tokens = self.tokenizer.tokenize(content);
-
-        // token filtering
-        for filter in self.token_filters.iter() {
-            tokens = filter.filter(tokens);
-        }
-
-        let content = tokens.join(" ");
-        page.cleaned_content = content;
+    /// Processes a single page by analyzing its content
+    fn process_page(&self, mut page: Page) -> Result<Page> {
+        let tokens = self.text_analyzer.analyze(page.html_body.clone())?;
+        page.cleaned_content = tokens.join(" ");
         Ok(page)
     }
 }

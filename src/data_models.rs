@@ -62,13 +62,15 @@ pub struct InvertedIndexDoc {
     #[serde(rename = "_id")]
     pub id: ObjectId,
     term: String,
+    bucket: i16,
     postings: Vec<ObjectId>,
 }
 
 impl InvertedIndexDoc {
-    pub fn new(term: String, postings: Vec<ObjectId>) -> InvertedIndexDoc {
+    pub fn new(term: String, bucket: i16, postings: Vec<ObjectId>) -> InvertedIndexDoc {
         InvertedIndexDoc {
             id: ObjectId::new(),
+            bucket,
             term,
             postings,
         }

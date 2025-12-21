@@ -16,6 +16,7 @@ static DB: OnceCell<Database> = OnceCell::new();
 /// Collection names as constants for consistency
 pub mod collections {
     pub const PAGES: &str = "pages";
+    pub const INDEX: &str = "inverted_index";
     // Add more collection names here as your project grows
     // pub const USERS: &str = "users";
 }
@@ -99,9 +100,7 @@ impl Database {
         &self.db
     }
 
-    // =========================================================================
     // Collection accessors - add typed accessors for each collection
-    // =========================================================================
 
     /// Get the pages collection
     pub fn pages(&self) -> Collection<Page> {
@@ -114,9 +113,7 @@ impl Database {
     // }
 }
 
-// =============================================================================
 // Generic CRUD operations
-// =============================================================================
 
 /// Generic repository trait for common CRUD operations.
 /// Implement this for specific collections or use the generic functions below.
@@ -262,10 +259,7 @@ where
     }
 }
 
-// =============================================================================
 // Convenience functions for Page collection
-// =============================================================================
-
 impl Database {
     /// Get a repository for Page documents
     pub fn pages_repo(&self) -> Repository<Page> {
@@ -273,9 +267,7 @@ impl Database {
     }
 }
 
-// =============================================================================
 // Page-specific operations
-// =============================================================================
 
 /// Extended operations specific to Page collection
 pub struct PageRepo {
@@ -402,10 +394,7 @@ impl PageRepo {
     }
 }
 
-// =============================================================================
 // Test utilities
-// =============================================================================
-
 #[cfg(test)]
 pub mod test_utils {
     use super::*;

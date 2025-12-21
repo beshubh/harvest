@@ -359,6 +359,7 @@ impl Indexer {
         while let Some(Reverse(item)) = min_terms.pop() {
             let cursor = &mut streamers[item.streamer_idx];
             let mut current_postings = item.doc.postings;
+            let mut bucket = 0_i16;
             while let Some(spimi_doc) = cursor.next().await {
                 let doc = spimi_doc.unwrap();
                 if doc.term != item.term {
@@ -374,18 +375,21 @@ impl Indexer {
                 let result_postings = merge_sorted_lists(&current_postings, &postings);
                 current_postings = result_postings;
                 if current_postings.len() >= DOCIDS_PER_MONGO_DOCUMENT {
-                    let doc = InvertedIndexDoc::new(item.term.clone(), current_postings.clone());
+                    let doc =
+                        InvertedIndexDoc::new(item.term.clone(), bucket, current_postings.clone());
                     self.db
                         .collection::<InvertedIndexDoc>("inverted_index")
                         .insert_one(doc)
                         .await
                         .unwrap();
                     docs_written += 1;
+                    bucket += 1;
                     current_postings.clear();
                 }
             }
             if current_postings.len() > 0 {
-                let doc = InvertedIndexDoc::new(item.term.clone(), current_postings.clone());
+                let doc =
+                    InvertedIndexDoc::new(item.term.clone(), bucket, current_postings.clone());
                 self.db
                     .collection::<InvertedIndexDoc>("inverted_index")
                     .insert_one(doc)
@@ -409,8 +413,54 @@ impl Indexer {
             terms_merged,
             docs_written
         );
+
+        // Clean up temporary SPIMI block collections
+        self.cleanup_spimi_blocks().await?;
+
         log::info!("Indexing complete! Safe to quit now.");
 
+        Ok(())
+    }
+
+    async fn cleanup_spimi_blocks(&self) -> Result<()> {
+        log::info!("Cleaning up temporary SPIMI block collections");
+
+        let filter = doc! {
+            "name": {
+                "$regex": r"^spimi_block_*"
+            }
+        };
+        let collections = self
+            .db
+            .database()
+            .list_collection_names()
+            .filter(filter)
+            .await?;
+
+        let num_collections = collections.len();
+        if num_collections == 0 {
+            log::info!("No SPIMI block collections to clean up");
+            return Ok(());
+        }
+
+        log::info!(
+            "Found {} SPIMI block collections to delete",
+            num_collections
+        );
+
+        for collection_name in collections {
+            log::debug!("  Dropping collection: {}", collection_name);
+            self.db
+                .database()
+                .collection::<SpimiDoc>(&collection_name)
+                .drop()
+                .await?;
+        }
+
+        log::info!(
+            "Successfully deleted {} SPIMI block collections",
+            num_collections
+        );
         Ok(())
     }
 }
