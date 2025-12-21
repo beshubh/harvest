@@ -82,7 +82,9 @@ impl Crawler {
                 vec![Box::new(crate::analyzer::HTMLTagFilter::default())],
                 Box::new(crate::analyzer::WhiteSpaceTokenizer),
                 vec![
+                    Box::new(crate::analyzer::PunctuationStripFilter::default()),
                     Box::new(crate::analyzer::LowerCaseTokenFilter),
+                    Box::new(crate::analyzer::NumericTokenFilter),
                     Box::new(crate::analyzer::StopWordTokenFilter),
                     Box::new(crate::analyzer::PorterStemmerTokenFilter),
                 ],

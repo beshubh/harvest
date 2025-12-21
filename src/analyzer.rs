@@ -333,6 +333,63 @@ impl TokenFilter for PorterStemmerTokenFilter {
     }
 }
 
+/// Strips punctuation from tokens and filters out tokens that become empty or are too short
+pub struct PunctuationStripFilter {
+    min_length: usize,
+}
+
+impl PunctuationStripFilter {
+    pub fn new(min_length: usize) -> Self {
+        Self { min_length }
+    }
+}
+
+impl Default for PunctuationStripFilter {
+    fn default() -> Self {
+        Self { min_length: 2 }
+    }
+}
+
+impl TokenFilter for PunctuationStripFilter {
+    fn filter(&self, tokens: Vec<String>) -> Vec<String> {
+        tokens
+            .into_iter()
+            .filter_map(|token| {
+                // Strip leading and trailing punctuation
+                let trimmed: String = token
+                    .trim_matches(|c: char| !c.is_alphanumeric())
+                    .to_string();
+
+                // Filter out tokens that are:
+                // 1. Empty after trimming
+                // 2. Too short (less than min_length)
+                // 3. Only contain non-alphanumeric characters
+                if trimmed.len() >= self.min_length && trimmed.chars().any(|c| c.is_alphanumeric())
+                {
+                    Some(trimmed)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+}
+
+/// Filters out tokens that are purely numeric (like "123", "45.67", etc.)
+pub struct NumericTokenFilter;
+
+impl TokenFilter for NumericTokenFilter {
+    fn filter(&self, tokens: Vec<String>) -> Vec<String> {
+        tokens
+            .into_iter()
+            .filter(|token| {
+                // Keep tokens that have at least one alphabetic character
+                token.chars().any(|c| c.is_alphabetic())
+            })
+            .collect()
+    }
+}
+
 pub struct Analyzer {
     char_filters: Vec<Box<dyn CharacterFilter>>,
     tokenizer: Box<dyn Tokenizer>,
@@ -457,5 +514,119 @@ mod tests {
         assert_eq!("New Heading", &extracted.headings[1]);
         assert_eq!("Link to Google", &extracted.anchors[0]);
         assert_eq!("\n This is a test \n Some other content ", &extracted.body);
+    }
+
+    #[test]
+    fn test_punctuation_strip_filter() {
+        let filter = PunctuationStripFilter::default();
+        let tokens = vec![
+            "!.".to_string(),
+            "!=".to_string(),
+            "!==".to_string(),
+            "=======".to_string(),
+            "![](banner.jpg)".to_string(),
+            "!important".to_string(),
+            "\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"".to_string(),
+            "\"(...)le\"".to_string(),
+            "hello".to_string(),
+            "world!".to_string(),
+            "test123".to_string(),
+            "...dots...".to_string(),
+            "a".to_string(),  // too short
+            "ab".to_string(), // min length is 2, this should pass
+        ];
+        let result = filter.filter(tokens);
+        assert_eq!(
+            result,
+            vec![
+                "banner.jpg".to_string(), // extracted from ![](banner.jpg)
+                "important".to_string(),
+                "le".to_string(),
+                "hello".to_string(),
+                "world".to_string(),
+                "test123".to_string(),
+                "dots".to_string(),
+                "ab".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_numeric_token_filter() {
+        let filter = NumericTokenFilter;
+        let tokens = vec![
+            "123".to_string(),
+            "45.67".to_string(),
+            "test123".to_string(),
+            "hello".to_string(),
+            "2024".to_string(),
+            "abc123def".to_string(),
+        ];
+        let result = filter.filter(tokens);
+        assert_eq!(
+            result,
+            vec![
+                "test123".to_string(),
+                "hello".to_string(),
+                "abc123def".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_full_analyzer_pipeline() {
+        // Simulate the full pipeline
+        let html = r#"<html><body>
+            <p>The !important CSS rule is used with ======= separators.</p>
+            <p>Check out ![](banner.jpg) for more info!!!</p>
+            <p>Contact us at 123-456-7890 or visit https://example.com</p>
+        </body></html>"#;
+
+        // Character filter
+        let html_filter = HTMLTagFilter;
+        let text = html_filter.filter(html.to_string());
+
+        // Tokenizer
+        let tokenizer = WhiteSpaceTokenizer;
+        let tokens = tokenizer.tokenize(text);
+
+        // Token filters
+        let punct_filter = PunctuationStripFilter::default();
+        let tokens = punct_filter.filter(tokens);
+
+        let lower_filter = LowerCaseTokenFilter;
+        let tokens = lower_filter.filter(tokens);
+
+        let numeric_filter = NumericTokenFilter;
+        let tokens = numeric_filter.filter(tokens);
+
+        let stop_filter = StopWordTokenFilter;
+        let tokens = stop_filter.filter(tokens);
+
+        let stem_filter = PorterStemmerTokenFilter;
+        let tokens = stem_filter.filter(tokens);
+
+        // Should have clean tokens now, without punctuation noise
+        // and without stop words like "the", "is", "with", "at", "or", "for", "used"
+        assert!(tokens.contains(&"css".to_string()));
+        assert!(tokens.contains(&"rule".to_string()));
+        assert!(tokens.contains(&"separ".to_string())); // stemmed from "separators"
+        assert!(tokens.contains(&"check".to_string()));
+        assert!(tokens.contains(&"info".to_string()));
+
+        // These should NOT be in the tokens
+        assert!(!tokens.contains(&"!important".to_string()));
+        assert!(!tokens.contains(&"=======".to_string()));
+        assert!(!tokens.contains(&"![](banner.jpg)".to_string()));
+        assert!(!tokens.contains(&"the".to_string())); // stop word
+        assert!(!tokens.contains(&"123".to_string())); // numeric only
+        assert!(!tokens.contains(&"456".to_string())); // numeric only
+        assert!(!tokens.contains(&"7890".to_string())); // numeric only
+
+        // Make sure we're cleaning up the index properly
+        // by removing pure punctuation terms
+        assert!(!tokens.contains(&"!.".to_string()));
+        assert!(!tokens.contains(&"!=".to_string()));
+        assert!(!tokens.contains(&"!==".to_string()));
     }
 }
