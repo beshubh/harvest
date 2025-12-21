@@ -16,6 +16,35 @@ use crate::db::PageRepo;
 const MAX_FETCH_RETRIES: usize = 4;
 const MAX_DOCUMENT_SIZE_BYTES: usize = 15 * 1024 * 1024; // 15 MB (leaving margin for MongoDB's 16MB limit)
 
+// List of file extensions that indicate non-HTML files (images, audio, pdf, documents, archives, etc)
+const NON_HTML_EXTENSIONS: [&str; 27] = [
+    // Images
+    ".png", ".jpg", ".jpeg", ".gif", ".svg", ".bmp", ".webp", ".tiff", ".mov", // Audio/Video
+    ".mp3", ".mp4", ".wav", ".ogg", // Documents
+    ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", // Archives
+    ".zip", ".rar", ".tar", ".gz", ".m", ".bib", ".txt",
+];
+
+/// Error type for fetch_page failures.
+/// Used to differentiate between "not HTML" content and "other" errors.
+#[derive(Debug, thiserror::Error)]
+pub enum FetchPageError {
+    #[error("Response content is not HTML (content-type: {0})")]
+    NotHtml(String),
+
+    #[error("Non-HTML file extension: {0}")]
+    NonHtmlExtension(String),
+
+    #[error("Other fetch error: {0}")]
+    Other(#[from] anyhow::Error),
+}
+
+impl From<reqwest::Error> for FetchPageError {
+    fn from(value: reqwest::Error) -> Self {
+        FetchPageError::Other(value.into())
+    }
+}
+
 pub struct Crawler {
     visited_urls: DashSet<String>,
     max_depth: usize,
@@ -53,6 +82,7 @@ impl Crawler {
                 vec![Box::new(crate::analyzer::HTMLTagFilter::default())],
                 Box::new(crate::analyzer::WhiteSpaceTokenizer),
                 vec![
+                    Box::new(crate::analyzer::LowerCaseTokenFilter),
                     Box::new(crate::analyzer::StopWordTokenFilter),
                     Box::new(crate::analyzer::PorterStemmerTokenFilter),
                 ],
@@ -86,8 +116,15 @@ impl Crawler {
                 }
                 let res = self_clone.fetch_page(&url).await;
                 if let Err(e) = res {
-                    log::error!("error fetching page {url}, error: {:#}", e);
-                    retried += 1;
+                    match e {
+                        FetchPageError::NonHtmlExtension(_) | FetchPageError::NotHtml(_) => {
+                            break;
+                        }
+                        FetchPageError::Other(msg) => {
+                            log::error!("error fetching page {url}, error: {:#}", msg);
+                            retried += 1;
+                        }
+                    }
                 } else {
                     html = Some(res.unwrap());
                     break;
@@ -95,6 +132,7 @@ impl Crawler {
                 tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
             }
             drop(permit);
+
             if html.is_none() {
                 return;
             }
@@ -181,9 +219,25 @@ impl Crawler {
         });
     }
 
-    async fn fetch_page(&self, url: &str) -> Result<String> {
+    async fn fetch_page(&self, url: &str) -> Result<String, FetchPageError> {
         let client = reqwest::Client::new();
+        if NON_HTML_EXTENSIONS.iter().any(|ext| url.ends_with(ext)) {
+            return Err(FetchPageError::NonHtmlExtension(
+                "URL ext does not ends with html".into(),
+            ));
+        }
+
         let res = client.get(url).send().await?;
+        if let Some(content_type) = res.headers().get(reqwest::header::CONTENT_TYPE) {
+            let ct = content_type.to_str().unwrap_or("").to_lowercase();
+            if !ct.contains("html") {
+                return Err(FetchPageError::NotHtml(format!(
+                    "Content-Type is not HTML: {} for url: {}",
+                    ct, url
+                )));
+            }
+        }
+
         let body = res.text().await?;
         Ok(body)
     }
@@ -208,8 +262,17 @@ impl Crawler {
             if let Some(href) = element.value().attr("href") {
                 if let Ok(resolved) = base.join(href) {
                     if resolved.scheme() == "http" || resolved.scheme() == "https" {
-                        if !self.visited_urls.contains(&resolved.to_string()) {
-                            seen.insert(resolved.to_string());
+                        let resolved_str = resolved.to_string();
+                        let lower_resolved = resolved_str.to_lowercase();
+                        // Skip adding if URL ends with a known non-HTML file extension
+                        if NON_HTML_EXTENSIONS
+                            .iter()
+                            .any(|ext| lower_resolved.ends_with(ext))
+                        {
+                            continue;
+                        }
+                        if !self.visited_urls.contains(&resolved_str) {
+                            seen.insert(resolved_str);
                         }
                     }
                 }

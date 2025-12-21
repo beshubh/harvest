@@ -804,6 +804,7 @@ dependencies = [
  "serde",
  "serde_json",
  "stop-words",
+ "thiserror",
  "tokio",
  "tracing",
  "tracing-log 0.1.4",
