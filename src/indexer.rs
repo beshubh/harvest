@@ -43,7 +43,11 @@ const DOCID_BYTES: usize = size_of::<ObjectId>();
 const DOCIDS_PER_MONGO_DOCUMENT: usize = 1_000_000;
 const BUDGET_IN_MEM_BYTES: usize = 1_000_000_000; // 1 GB
 
-pub struct Token(pub String, pub ObjectId);
+pub struct Token {
+    term: String,
+    doc_id: ObjectId,
+    pos: usize,
+}
 
 pub enum StreamMsg {
     Token(Token),
@@ -51,7 +55,7 @@ pub enum StreamMsg {
 }
 pub struct SpimiBlock {
     pub sorted_terms: Vec<String>,
-    pub dictionary: HashMap<String, Vec<ObjectId>>,
+    pub dictionary: HashMap<String, DictItem>,
 }
 
 pub struct Indexer {
@@ -60,6 +64,20 @@ pub struct Indexer {
     page_fetch_limit: i64,
     token_stream_tx: mpsc::UnboundedSender<StreamMsg>,
     token_stream_rx: Mutex<mpsc::UnboundedReceiver<StreamMsg>>,
+}
+
+pub struct DictItem {
+    postings: Vec<ObjectId>,
+    positions: HashMap<ObjectId, Vec<usize>>,
+}
+
+impl DictItem {
+    fn new() -> Self {
+        Self {
+            postings: vec![],
+            positions: HashMap::new(),
+        }
+    }
 }
 
 impl Indexer {
@@ -92,13 +110,16 @@ impl Indexer {
             log::info!("Starting page tokenization stream");
             let mut total_pages_processed = 0;
             while pages.len() != 0 {
+                // Do text analysis first, then take those pages and do the indexing
+
                 total_pages_processed += pages.len();
-                if let Err(e) = self_clone.pages_to_token_stream(&pages) {
+                let rc_pages = pages.into_iter().map(Arc::new).collect();
+                if let Err(e) = self_clone.pages_to_token_stream(&rc_pages) {
                     log::error!("Error converting pages to token stream: {:#}", e);
                 }
                 log::debug!(
                     "Processed {} pages (total: {})",
-                    pages.len(),
+                    rc_pages.len(),
                     total_pages_processed
                 );
 
@@ -127,23 +148,33 @@ impl Indexer {
         Ok(())
     }
 
-    pub async fn spin_indexer(self: Arc<Self>) -> Result<()> {
-        self.run(BUDGET_IN_MEM_BYTES).await
-    }
-
-    pub fn pages_to_token_stream(&self, pages: &Vec<Page>) -> Result<()> {
+    pub fn pages_to_token_stream(&self, pages: &Vec<Arc<Page>>) -> Result<()> {
         let token_stream = self.token_stream_tx.clone();
         let mut total_tokens = 0;
+        let text_analyzer = crate::analyzer::TextAnalyzer::new(
+            vec![Box::new(crate::analyzer::HTMLTagFilter::default())],
+            Box::new(crate::analyzer::WhiteSpaceTokenizer),
+            vec![
+                Box::new(crate::analyzer::PunctuationStripFilter::default()),
+                Box::new(crate::analyzer::LowerCaseTokenFilter),
+                Box::new(crate::analyzer::NumericTokenFilter),
+                Box::new(crate::analyzer::StopWordTokenFilter),
+                Box::new(crate::analyzer::PorterStemmerTokenFilter),
+        ],
+        );
         for page in pages {
-            let terms = page.cleaned_content.split_ascii_whitespace();
-            for term in terms {
-                let term = term.trim();
+            // TODO: do text analysis here, instead of having that in a separate step.
+            let cleaned_terms = text_analyzer.analyze(page.html_body.clone())?;
+            for text_token in cleaned_terms {
+                let term = text_token.term.trim();
                 if term.is_empty() {
                     continue;
                 }
-                if let Err(e) =
-                    token_stream.send(StreamMsg::Token(Token(term.to_string(), page.id)))
-                {
+                if let Err(e) = token_stream.send(StreamMsg::Token(Token {
+                    term: term.to_string(),
+                    doc_id: page.id,
+                    pos: text_token.pos,
+                })) {
                     log::error!("Error sending token to token stream: {:#}", e);
                 }
                 total_tokens += 1;
@@ -160,7 +191,7 @@ impl Indexer {
     pub async fn spimi_invert(self: Arc<Self>, budget_bytes: usize) -> Result<()> {
         log::info!("Starting SPIMI inversion");
 
-        let mut dict: HashMap<String, Vec<ObjectId>> = HashMap::new();
+        let mut dict: HashMap<String, DictItem> = HashMap::new();
         let mut used_bytes = 0_usize;
         let mut token_stream = self.token_stream_rx.lock().await;
         let mut tokens_processed = 0;
@@ -172,17 +203,22 @@ impl Indexer {
                 StreamMsg::End => break,
             };
 
-            let (term, doc_id) = (token.0, token.1);
+            let (term, doc_id, pos) = (token.term, token.doc_id, token.pos);
             tokens_processed += 1;
 
             if !dict.contains_key(&term) {
                 used_bytes += term.len();
                 used_bytes += 3 * std::mem::size_of::<usize>(); // Vec {len, capacity, ptr}
             }
-            let postings = dict.entry(term).or_insert_with(Vec::new);
-            let cap_before = postings.capacity();
-            postings.push(doc_id);
-            let cap_after = postings.capacity();
+            let dict_item = dict.entry(term.clone()).or_insert_with(DictItem::new);
+
+            let cap_before = dict_item.postings.capacity();
+
+            dict_item.postings.push(doc_id);
+            let doc_positions = dict_item.positions.entry(doc_id).or_insert_with(Vec::new);
+            doc_positions.push(pos);
+
+            let cap_after = dict_item.postings.capacity();
             if cap_after > cap_before {
                 used_bytes += (cap_after - cap_before) * DOCID_BYTES;
             }
@@ -223,6 +259,7 @@ impl Indexer {
         // final flush
         let mut sorted_terms = dict.keys().cloned().collect::<Vec<String>>();
         sorted_terms.sort();
+
         self.persist_block_to_disk(SpimiBlock {
             sorted_terms: sorted_terms,
             dictionary: dict,
@@ -263,13 +300,15 @@ impl Indexer {
         let mut terms_written = 0;
 
         for term in block.sorted_terms {
-            if let Some(postings) = block.dictionary.get(&term) {
+            if let Some(dict_item) = block.dictionary.get(&term) {
+                let postings = &dict_item.postings;
+
                 // part the postings by 1 Million
                 // insert each part with term to mongo
-                let part_size = 1_000_000;
-                let collection = collection.clone();
-                for part in postings.chunks(part_size) {
-                    let doc = SpimiDoc::new(term.clone(), part.to_vec()); // NOTE: can we optimize part.to_vec() ?
+                // TODO: persist the positions as well to mongodb
+                // TODO: FIX document_frequency, positions
+                for part in postings.chunks(DOCIDS_PER_MONGO_DOCUMENT) {
+                    let doc = SpimiDoc::new(term.clone(), part.to_vec(), HashMap::new()); // NOTE: can we optimize part.to_vec() ?
                     let _ = collection.insert_one(doc).await?;
                 }
 
@@ -374,9 +413,10 @@ impl Indexer {
                 let postings = doc.postings;
                 let result_postings = merge_sorted_lists(&current_postings, &postings);
                 current_postings = result_postings;
+                // TODO: fix positions and document_frequency
                 if current_postings.len() >= DOCIDS_PER_MONGO_DOCUMENT {
                     let doc =
-                        InvertedIndexDoc::new(item.term.clone(), bucket, current_postings.clone());
+                        InvertedIndexDoc::new(item.term.clone(), bucket, 0, current_postings.clone(), HashMap::new());
                     self.db
                         .collection::<InvertedIndexDoc>("inverted_index")
                         .insert_one(doc)
@@ -388,8 +428,9 @@ impl Indexer {
                 }
             }
             if current_postings.len() > 0 {
+                // TODO: fix positions and document_frequency
                 let doc =
-                    InvertedIndexDoc::new(item.term.clone(), bucket, current_postings.clone());
+                    InvertedIndexDoc::new(item.term.clone(), bucket, 0, current_postings.clone(), HashMap::new());
                 self.db
                     .collection::<InvertedIndexDoc>("inverted_index")
                     .insert_one(doc)

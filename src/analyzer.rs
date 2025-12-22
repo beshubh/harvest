@@ -301,26 +301,29 @@ impl Tokenizer for WhiteSpaceTokenizer {
 /// filter removes common words (stop words) like the from the token stream,
 /// and a synonym token filter introduces synonyms into the token stream.
 pub trait TokenFilter: Send + Sync {
-    fn filter(&self, tokens: Vec<String>) -> Vec<String>;
+    fn filter(&self, tokens: Vec<TextToken>) -> Vec<TextToken>;
 }
 
 pub struct LowerCaseTokenFilter;
 
 impl TokenFilter for LowerCaseTokenFilter {
-    fn filter(&self, tokens: Vec<String>) -> Vec<String> {
+    fn filter(&self, tokens: Vec<TextToken>) -> Vec<TextToken> {
         tokens
-            .iter()
-            .map(|w| w.to_lowercase())
-            .collect::<Vec<String>>()
+            .into_iter()
+            .map(|mut t| {
+                t.term = t.term.to_lowercase();
+                t
+            })
+            .collect()
     }
 }
 
 pub struct StopWordTokenFilter;
 
 impl TokenFilter for StopWordTokenFilter {
-    fn filter(&self, mut tokens: Vec<String>) -> Vec<String> {
+    fn filter(&self, mut tokens: Vec<TextToken>) -> Vec<TextToken> {
         let stop_words = get_stop_words();
-        tokens.retain(|w| !stop_words.contains(w));
+        tokens.retain(|w| !stop_words.contains(&w.term));
         tokens
     }
 }
@@ -328,8 +331,14 @@ impl TokenFilter for StopWordTokenFilter {
 pub struct PorterStemmerTokenFilter;
 
 impl TokenFilter for PorterStemmerTokenFilter {
-    fn filter(&self, tokens: Vec<String>) -> Vec<String> {
-        tokens.iter().map(|w| stem(w)).collect::<Vec<String>>()
+    fn filter(&self, tokens: Vec<TextToken>) -> Vec<TextToken> {
+        tokens
+            .into_iter()
+            .map(|mut w| {
+                w.term = stem(&w.term);
+                w
+            })
+            .collect::<Vec<TextToken>>()
     }
 }
 
@@ -351,12 +360,13 @@ impl Default for PunctuationStripFilter {
 }
 
 impl TokenFilter for PunctuationStripFilter {
-    fn filter(&self, tokens: Vec<String>) -> Vec<String> {
+    fn filter(&self, tokens: Vec<TextToken>) -> Vec<TextToken> {
         tokens
             .into_iter()
-            .filter_map(|token| {
+            .filter_map(|mut token| {
                 // Strip leading and trailing punctuation
                 let trimmed: String = token
+                    .term
                     .trim_matches(|c: char| !c.is_alphanumeric())
                     .to_string();
 
@@ -366,7 +376,8 @@ impl TokenFilter for PunctuationStripFilter {
                 // 3. Only contain non-alphanumeric characters
                 if trimmed.len() >= self.min_length && trimmed.chars().any(|c| c.is_alphanumeric())
                 {
-                    Some(trimmed)
+                    token.term = trimmed;
+                    Some(token)
                 } else {
                     None
                 }
@@ -379,12 +390,12 @@ impl TokenFilter for PunctuationStripFilter {
 pub struct NumericTokenFilter;
 
 impl TokenFilter for NumericTokenFilter {
-    fn filter(&self, tokens: Vec<String>) -> Vec<String> {
+    fn filter(&self, tokens: Vec<TextToken>) -> Vec<TextToken> {
         tokens
             .into_iter()
             .filter(|token| {
                 // Keep tokens that have at least one alphabetic character
-                token.chars().any(|c| c.is_alphabetic())
+                token.term.chars().any(|c| c.is_alphabetic())
             })
             .collect()
     }
@@ -395,6 +406,26 @@ pub struct TextAnalyzer {
     char_filters: Vec<Box<dyn CharacterFilter>>,
     tokenizer: Box<dyn Tokenizer>,
     token_filters: Vec<Box<dyn TokenFilter>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TextToken {
+    pub term: String,
+    pub pos: usize,
+}
+
+impl std::ops::Deref for TextToken {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        &self.term
+    }
+}
+
+impl Into<mongodb::bson::Bson> for TextToken {
+    fn into(self) -> mongodb::bson::Bson {
+        mongodb::bson::Bson::String(self.term)
+    }
 }
 
 impl TextAnalyzer {
@@ -410,22 +441,39 @@ impl TextAnalyzer {
         }
     }
 
-    /// Analyzes raw content and returns a list of tokens
-    pub fn analyze(&self, raw_content: String) -> Result<Vec<String>> {
-        // Character filtering
-        let mut content = raw_content;
+    pub fn char_filter(&self, mut content: String) -> String {
         for filter in self.char_filters.iter() {
             content = filter.filter(content);
         }
+        content
+    }
 
-        // Tokenization
-        let mut tokens = self.tokenizer.tokenize(content);
+    pub fn tokenize(&self, content: String) -> Vec<TextToken> {
+        let tokens = self.tokenizer.tokenize(content);
+        tokens
+            .iter()
+            .enumerate()
+            .map(|(idx, tok)| TextToken {
+                term: tok.clone(),
+                pos: idx,
+            })
+            .collect()
+    }
 
-        // Token filtering
+    pub fn token_filter(&self, mut tokens: Vec<TextToken>) -> Vec<TextToken> {
         for filter in self.token_filters.iter() {
             tokens = filter.filter(tokens);
         }
+        tokens
+    }
 
+    /// Analyzes raw content and returns a list of tokens
+    pub fn analyze(&self, raw_content: String) -> Result<Vec<TextToken>> {
+        let content = self.char_filter(raw_content);
+
+        let mut tokens = self.tokenize(content);
+
+        tokens = self.token_filter(tokens);
         Ok(tokens)
     }
 }
@@ -479,7 +527,11 @@ impl PageProcessor {
     /// Processes a single page by analyzing its content
     fn process_page(&self, mut page: Page) -> Result<Page> {
         let tokens = self.text_analyzer.analyze(page.html_body.clone())?;
-        page.cleaned_content = tokens.join(" ");
+        page.cleaned_content = tokens
+            .into_iter()
+            .map(|t| t.term)
+            .collect::<Vec<String>>()
+            .join(" ");
         Ok(page)
     }
 }
@@ -487,6 +539,39 @@ impl PageProcessor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn mk_tokens(terms: &[&str]) -> Vec<TextToken> {
+        terms
+            .iter()
+            .enumerate()
+            .map(|(pos, term)| TextToken {
+                term: (*term).to_string(),
+                pos,
+            })
+            .collect()
+    }
+
+    fn terms(tokens: Vec<TextToken>) -> Vec<String> {
+        tokens.into_iter().map(|t| t.term).collect()
+    }
+
+    fn assert_contains(tokens: &[TextToken], term: &str) {
+        assert!(
+            tokens.iter().any(|t| t.term == term),
+            "expected token stream to contain term {:?}, but got {:?}",
+            term,
+            tokens.iter().map(|t| t.term.as_str()).collect::<Vec<_>>()
+        );
+    }
+
+    fn assert_not_contains(tokens: &[TextToken], term: &str) {
+        assert!(
+            !tokens.iter().any(|t| t.term == term),
+            "expected token stream to NOT contain term {:?}, but got {:?}",
+            term,
+            tokens.iter().map(|t| t.term.as_str()).collect::<Vec<_>>()
+        );
+    }
 
     #[test]
     fn test_compress_whitespaces() {
@@ -539,23 +624,23 @@ mod tests {
     #[test]
     fn test_punctuation_strip_filter() {
         let filter = PunctuationStripFilter::default();
-        let tokens = vec![
-            "!.".to_string(),
-            "!=".to_string(),
-            "!==".to_string(),
-            "=======".to_string(),
-            "![](banner.jpg)".to_string(),
-            "!important".to_string(),
-            "\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"".to_string(),
-            "\"(...)le\"".to_string(),
-            "hello".to_string(),
-            "world!".to_string(),
-            "test123".to_string(),
-            "...dots...".to_string(),
-            "a".to_string(),  // too short
-            "ab".to_string(), // min length is 2, this should pass
-        ];
-        let result = filter.filter(tokens);
+        let tokens = mk_tokens(&[
+            "!.",
+            "!=",
+            "!==",
+            "=======",
+            "![](banner.jpg)",
+            "!important",
+            "\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"",
+            "\"(...)le\"",
+            "hello",
+            "world!",
+            "test123",
+            "...dots...",
+            "a",  // too short
+            "ab", // min length is 2, this should pass
+        ]);
+        let result = terms(filter.filter(tokens));
         assert_eq!(
             result,
             vec![
@@ -574,15 +659,8 @@ mod tests {
     #[test]
     fn test_numeric_token_filter() {
         let filter = NumericTokenFilter;
-        let tokens = vec![
-            "123".to_string(),
-            "45.67".to_string(),
-            "test123".to_string(),
-            "hello".to_string(),
-            "2024".to_string(),
-            "abc123def".to_string(),
-        ];
-        let result = filter.filter(tokens);
+        let tokens = mk_tokens(&["123", "45.67", "test123", "hello", "2024", "abc123def"]);
+        let result = terms(filter.filter(tokens));
         assert_eq!(
             result,
             vec![
@@ -609,6 +687,11 @@ mod tests {
         // Tokenizer
         let tokenizer = WhiteSpaceTokenizer;
         let tokens = tokenizer.tokenize(text);
+        let tokens = tokens
+            .into_iter()
+            .enumerate()
+            .map(|(pos, term)| TextToken { term, pos })
+            .collect::<Vec<TextToken>>();
 
         // Token filters
         let punct_filter = PunctuationStripFilter::default();
@@ -628,25 +711,25 @@ mod tests {
 
         // Should have clean tokens now, without punctuation noise
         // and without stop words like "the", "is", "with", "at", "or", "for", "used"
-        assert!(tokens.contains(&"css".to_string()));
-        assert!(tokens.contains(&"rule".to_string()));
-        assert!(tokens.contains(&"separ".to_string())); // stemmed from "separators"
-        assert!(tokens.contains(&"check".to_string()));
-        assert!(tokens.contains(&"info".to_string()));
+        assert_contains(&tokens, "css");
+        assert_contains(&tokens, "rule");
+        assert_contains(&tokens, "separ"); // stemmed from "separators"
+        assert_contains(&tokens, "check");
+        assert_contains(&tokens, "info");
 
         // These should NOT be in the tokens
-        assert!(!tokens.contains(&"!important".to_string()));
-        assert!(!tokens.contains(&"=======".to_string()));
-        assert!(!tokens.contains(&"![](banner.jpg)".to_string()));
-        assert!(!tokens.contains(&"the".to_string())); // stop word
-        assert!(!tokens.contains(&"123".to_string())); // numeric only
-        assert!(!tokens.contains(&"456".to_string())); // numeric only
-        assert!(!tokens.contains(&"7890".to_string())); // numeric only
+        assert_not_contains(&tokens, "!important");
+        assert_not_contains(&tokens, "=======");
+        assert_not_contains(&tokens, "![](banner.jpg)");
+        assert_not_contains(&tokens, "the"); // stop word
+        assert_not_contains(&tokens, "123"); // numeric only
+        assert_not_contains(&tokens, "456"); // numeric only
+        assert_not_contains(&tokens, "7890"); // numeric only
 
         // Make sure we're cleaning up the index properly
         // by removing pure punctuation terms
-        assert!(!tokens.contains(&"!.".to_string()));
-        assert!(!tokens.contains(&"!=".to_string()));
-        assert!(!tokens.contains(&"!==".to_string()));
+        assert_not_contains(&tokens, "!.");
+        assert_not_contains(&tokens, "!=");
+        assert_not_contains(&tokens, "!==");
     }
 }

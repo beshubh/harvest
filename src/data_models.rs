@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use mongodb::bson::{DateTime, oid::ObjectId};
 use serde::{Deserialize, Serialize};
 
@@ -39,20 +41,23 @@ impl Page {
     }
 }
 
+// TODO: add schema for holding both the postings list and positions per doc for the term.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SpimiDoc {
     #[serde(rename = "_id")]
     pub id: ObjectId,
     pub term: String,
     pub postings: Vec<ObjectId>,
+    pub positions: HashMap<ObjectId, Vec<usize>>
 }
 
 impl SpimiDoc {
-    pub fn new(term: String, postings: Vec<ObjectId>) -> SpimiDoc {
+    pub fn new(term: String, postings: Vec<ObjectId>, positions: HashMap<ObjectId, Vec<usize>>) -> SpimiDoc {
         SpimiDoc {
             id: ObjectId::new(),
             term,
             postings,
+            positions
         }
     }
 }
@@ -63,16 +68,20 @@ pub struct InvertedIndexDoc {
     pub id: ObjectId,
     term: String,
     bucket: i16,
+    document_frequency: i64,
     postings: Vec<ObjectId>,
+    positions: HashMap<ObjectId, Vec<usize>>,
 }
 
 impl InvertedIndexDoc {
-    pub fn new(term: String, bucket: i16, postings: Vec<ObjectId>) -> InvertedIndexDoc {
+    pub fn new(term: String, bucket: i16, document_frequency: i64, postings: Vec<ObjectId>, positions: HashMap<ObjectId, Vec<usize>>) -> InvertedIndexDoc {
         InvertedIndexDoc {
             id: ObjectId::new(),
             bucket,
             term,
             postings,
+            document_frequency,
+            positions,
         }
     }
 }
