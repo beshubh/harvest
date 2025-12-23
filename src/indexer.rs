@@ -7,6 +7,7 @@ use nanoid::nanoid;
 use mongodb::IndexModel;
 use mongodb::bson::doc;
 use std::cmp::Reverse;
+use std::collections::BTreeMap;
 use std::collections::BinaryHeap;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -41,7 +42,6 @@ use crate::db::PageRepo;
 
 const DOCID_BYTES: usize = size_of::<ObjectId>();
 const DOCIDS_PER_MONGO_DOCUMENT: usize = 1_000_000;
-const BUDGET_IN_MEM_BYTES: usize = 1_000_000_000; // 1 GB
 
 pub struct Token {
     term: String,
@@ -53,6 +53,7 @@ pub enum StreamMsg {
     Token(Token),
     End,
 }
+
 pub struct SpimiBlock {
     pub sorted_terms: Vec<String>,
     pub dictionary: HashMap<String, DictItem>,
@@ -68,14 +69,14 @@ pub struct Indexer {
 
 pub struct DictItem {
     postings: Vec<ObjectId>,
-    positions: HashMap<ObjectId, Vec<usize>>,
+    positions: BTreeMap<ObjectId, Vec<usize>>,
 }
 
 impl DictItem {
     fn new() -> Self {
         Self {
             postings: vec![],
-            positions: HashMap::new(),
+            positions: BTreeMap::new(),
         }
     }
 }
@@ -160,10 +161,9 @@ impl Indexer {
                 Box::new(crate::analyzer::NumericTokenFilter),
                 Box::new(crate::analyzer::StopWordTokenFilter),
                 Box::new(crate::analyzer::PorterStemmerTokenFilter),
-        ],
+            ],
         );
         for page in pages {
-            // TODO: do text analysis here, instead of having that in a separate step.
             let cleaned_terms = text_analyzer.analyze(page.html_body.clone())?;
             for text_token in cleaned_terms {
                 let term = text_token.term.trim();
@@ -205,22 +205,30 @@ impl Indexer {
 
             let (term, doc_id, pos) = (token.term, token.doc_id, token.pos);
             tokens_processed += 1;
-
             if !dict.contains_key(&term) {
                 used_bytes += term.len();
-                used_bytes += 3 * std::mem::size_of::<usize>(); // Vec {len, capacity, ptr}
+                used_bytes += std::mem::size_of::<DictItem>(); // struct overhead
             }
+
             let dict_item = dict.entry(term.clone()).or_insert_with(DictItem::new);
 
-            let cap_before = dict_item.postings.capacity();
+            let postings = &mut dict_item.postings;
+            let positions = &mut dict_item.positions;
 
-            dict_item.postings.push(doc_id);
-            let doc_positions = dict_item.positions.entry(doc_id).or_insert_with(Vec::new);
-            doc_positions.push(pos);
+            match positions.entry(doc_id) {
+                std::collections::btree_map::Entry::Vacant(e) => {
+                    // first time seeing this term in this document
+                    // adding to postings only when vacant to keep it unique
+                    postings.push(doc_id);
+                    e.insert(vec![pos]);
+                    used_bytes += DOCID_BYTES + std::mem::size_of::<Vec<u32>>() + 4;
+                }
+                std::collections::btree_map::Entry::Occupied(mut e) => {
+                    // already seen this term in this document
+                    e.get_mut().push(pos);
 
-            let cap_after = dict_item.postings.capacity();
-            if cap_after > cap_before {
-                used_bytes += (cap_after - cap_before) * DOCID_BYTES;
+                    used_bytes += 4; // just above pos
+                }
             }
 
             if tokens_processed % 100_000 == 0 {
@@ -305,33 +313,43 @@ impl Indexer {
 
                 // part the postings by 1 Million
                 // insert each part with term to mongo
-                // TODO: persist the positions as well to mongodb
-                // TODO: FIX document_frequency, positions
+                let mut bucket = 0_i16;
                 for part in postings.chunks(DOCIDS_PER_MONGO_DOCUMENT) {
-                    let doc = SpimiDoc::new(term.clone(), part.to_vec(), HashMap::new()); // NOTE: can we optimize part.to_vec() ?
+                    let df = part.len() as u64;
+                    // range query on postions to get the positions for all the docs less than the last doc in this part.
+                    // Since postings are sorted, the range is simply [first_doc..last_doc]
+                    let start_doc = part.first().expect("chunk should not be empty, start doc");
+                    let end_doc = part.last().expect("chunk should not be empty, end doc");
+                    let this_positions: HashMap<ObjectId, Vec<usize>> = dict_item
+                        .positions
+                        .range(start_doc..=end_doc)
+                        .map(|(k, v)| (*k, v.clone()))
+                        .collect();
+                    // TODO: abstract out the persistance in a separate interface
+                    let doc = SpimiDoc::new(term.clone(), bucket,df, part.to_vec(), this_positions); // NOTE: can we optimize part.to_vec() ?
                     let _ = collection.insert_one(doc).await?;
+                    bucket += 1;
                 }
 
                 terms_written += 1;
                 if terms_written % 1000 == 0 {
                     log::debug!("  Written {}/{} terms", terms_written, total_terms);
                 }
-
-                // create index in background
-                let options = IndexOptions::builder().background(Some(true)).build();
-                collection
-                    .create_index(
-                        IndexModel::builder()
-                            .options(options)
-                            .keys(doc! { "term": 1 })
-                            .build(),
-                    )
-                    .await?;
             } else {
                 log::error!("IMPOSSIBLE! term {} not found in dictionary", term);
             }
         }
 
+        // create index in background
+        let options = IndexOptions::builder().background(Some(true)).build();
+        collection
+            .create_index(
+                IndexModel::builder()
+                    .options(options)
+                    .keys(doc! { "term": 1 })
+                    .build(),
+            )
+            .await?;
         log::debug!(
             "Block persisted: {} ({} terms)",
             collection_name,
@@ -369,7 +387,7 @@ impl Indexer {
             log::debug!("  Opening cursor for block: {}", coll);
             let collection = self.db.collection::<SpimiDoc>(&coll);
             let options = mongodb::options::FindOptions::builder()
-                .sort(doc! { "term": 1})
+                .sort(doc! { "term": 1, "bucket": 1})
                 .build();
             let cursor = collection
                 .find(doc! {})
@@ -380,14 +398,14 @@ impl Indexer {
         }
 
         let mut min_terms: BinaryHeap<Reverse<HeapItem>> = BinaryHeap::new();
-
+        // prime the min terms heap
         for (idx, streamer) in streamers.iter_mut().enumerate() {
             if streamer.has_next() {
-                let e = streamer.next().await.unwrap().unwrap();
+                let doc = streamer.next().await.unwrap().unwrap();
                 min_terms.push(Reverse(HeapItem {
-                    term: e.term.clone(),
+                    term: doc.term.clone(),
                     streamer_idx: idx,
-                    doc: e,
+                    doc,
                 }));
             }
         }
@@ -398,6 +416,7 @@ impl Indexer {
         while let Some(Reverse(item)) = min_terms.pop() {
             let cursor = &mut streamers[item.streamer_idx];
             let mut current_postings = item.doc.postings;
+            let mut current_positions = item.doc.positions;
             let mut bucket = 0_i16;
             while let Some(spimi_doc) = cursor.next().await {
                 let doc = spimi_doc.unwrap();
@@ -411,12 +430,21 @@ impl Indexer {
                 }
 
                 let postings = doc.postings;
+                let positions = doc.positions;
                 let result_postings = merge_sorted_lists(&current_postings, &postings);
+                // merge the positions hashmap
                 current_postings = result_postings;
-                // TODO: fix positions and document_frequency
+                // TODO: fix positions
+                // merge the positions hashmap
+                current_positions.extend(positions);
                 if current_postings.len() >= DOCIDS_PER_MONGO_DOCUMENT {
-                    let doc =
-                        InvertedIndexDoc::new(item.term.clone(), bucket, 0, current_postings.clone(), HashMap::new());
+                    let doc = InvertedIndexDoc::new(
+                        item.term.clone(),
+                        bucket,
+                        current_postings.len() as u64,
+                        current_postings.clone(),
+                        HashMap::new(),
+                    );
                     self.db
                         .collection::<InvertedIndexDoc>("inverted_index")
                         .insert_one(doc)
@@ -425,12 +453,19 @@ impl Indexer {
                     docs_written += 1;
                     bucket += 1;
                     current_postings.clear();
+                    current_positions.clear();
                 }
             }
             if current_postings.len() > 0 {
                 // TODO: fix positions and document_frequency
-                let doc =
-                    InvertedIndexDoc::new(item.term.clone(), bucket, 0, current_postings.clone(), HashMap::new());
+                let df = current_postings.len() as u64;
+                let doc = InvertedIndexDoc::new(
+                    item.term.clone(),
+                    bucket,
+                    df,
+                    current_postings.clone(),
+                    current_positions
+                );
                 self.db
                     .collection::<InvertedIndexDoc>("inverted_index")
                     .insert_one(doc)
