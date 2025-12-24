@@ -3,6 +3,38 @@ use std::collections::HashMap;
 use mongodb::bson::{DateTime, oid::ObjectId};
 use serde::{Deserialize, Serialize};
 
+// Helper module for serializing HashMap<ObjectId, T> as HashMap<String, T>
+mod objectid_hashmap_serde {
+    use super::*;
+    use serde::{Deserializer, Serializer};
+    use std::collections::HashMap;
+
+    pub fn serialize<S, T>(map: &HashMap<ObjectId, T>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+        T: Serialize,
+    {
+        let string_map: HashMap<String, &T> = map.iter().map(|(k, v)| (k.to_hex(), v)).collect();
+        string_map.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D, T>(deserializer: D) -> Result<HashMap<ObjectId, T>, D::Error>
+    where
+        D: Deserializer<'de>,
+        T: Deserialize<'de>,
+    {
+        let string_map: HashMap<String, T> = HashMap::deserialize(deserializer)?;
+        string_map
+            .into_iter()
+            .map(|(k, v)| {
+                ObjectId::parse_str(&k)
+                    .map(|oid| (oid, v))
+                    .map_err(serde::de::Error::custom)
+            })
+            .collect()
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Page {
     #[serde(rename = "_id")]
@@ -50,6 +82,7 @@ pub struct SpimiDoc {
     pub bucket: i16,
     pub document_frequency: u64,
     pub postings: Vec<ObjectId>,
+    #[serde(with = "objectid_hashmap_serde")]
     pub positions: HashMap<ObjectId, Vec<usize>>,
 }
 
@@ -80,6 +113,7 @@ pub struct InvertedIndexDoc {
     bucket: i16,
     document_frequency: u64,
     postings: Vec<ObjectId>,
+    #[serde(with = "objectid_hashmap_serde")]
     positions: HashMap<ObjectId, Vec<usize>>,
 }
 

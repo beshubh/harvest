@@ -26,6 +26,7 @@ use crate::db::PageRepo;
 /// token = tuple[term, docId]
 /// token_stream is sorted by docIds
 /// SPIMI(token_stream)
+/// ```text
 ///     output_file = NEWFILE()
 ///     dictionary = HashMap()
 ///     while free_mem_available:
@@ -38,6 +39,7 @@ use crate::db::PageRepo;
 ///
 ///     sorted_terms = sort_dict_keys(dictionary)
 ///     write_block_to_disk_storage(sorted_terms, dictionary, output_file)
+/// ```
 ///
 
 const DOCID_BYTES: usize = size_of::<ObjectId>();
@@ -68,12 +70,12 @@ pub struct Indexer {
 }
 
 pub struct DictItem {
-    postings: Vec<ObjectId>,
-    positions: BTreeMap<ObjectId, Vec<usize>>,
+    pub postings: Vec<ObjectId>,
+    pub positions: BTreeMap<ObjectId, Vec<usize>>,
 }
 
 impl DictItem {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             postings: vec![],
             positions: BTreeMap::new(),
@@ -326,7 +328,8 @@ impl Indexer {
                         .map(|(k, v)| (*k, v.clone()))
                         .collect();
                     // TODO: abstract out the persistance in a separate interface
-                    let doc = SpimiDoc::new(term.clone(), bucket,df, part.to_vec(), this_positions); // NOTE: can we optimize part.to_vec() ?
+                    let doc =
+                        SpimiDoc::new(term.clone(), bucket, df, part.to_vec(), this_positions); // NOTE: can we optimize part.to_vec() ?
                     let _ = collection.insert_one(doc).await?;
                     bucket += 1;
                 }
@@ -430,13 +433,19 @@ impl Indexer {
                 }
 
                 let postings = doc.postings;
-                let positions = doc.positions;
                 let result_postings = merge_sorted_lists(&current_postings, &postings);
-                // merge the positions hashmap
                 current_postings = result_postings;
-                // TODO: fix positions
-                // merge the positions hashmap
-                current_positions.extend(positions);
+                for (doc_id, mut new_positions) in doc.positions {
+                    match current_positions.entry(doc_id) {
+                        std::collections::hash_map::Entry::Vacant(e) => {
+                            e.insert(new_positions);
+                        }
+                        std::collections::hash_map::Entry::Occupied(mut e) => {
+                            let x = e.get_mut();
+                            x.append(&mut new_positions);
+                        }
+                    }
+                }
                 if current_postings.len() >= DOCIDS_PER_MONGO_DOCUMENT {
                     let doc = InvertedIndexDoc::new(
                         item.term.clone(),
@@ -464,7 +473,7 @@ impl Indexer {
                     bucket,
                     df,
                     current_postings.clone(),
-                    current_positions
+                    current_positions,
                 );
                 self.db
                     .collection::<InvertedIndexDoc>("inverted_index")

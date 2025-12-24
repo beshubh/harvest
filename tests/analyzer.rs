@@ -1,5 +1,22 @@
 use harvest::analyzer::*;
 
+// Test helper to create TextTokens from strings
+fn make_tokens(terms: Vec<&str>) -> Vec<TextToken> {
+    terms
+        .into_iter()
+        .enumerate()
+        .map(|(i, term)| TextToken {
+            term: term.to_string(),
+            pos: i,
+        })
+        .collect()
+}
+
+// Test helper to extract terms from TextTokens for comparison
+fn extract_terms(tokens: &[TextToken]) -> Vec<String> {
+    tokens.iter().map(|t| t.term.clone()).collect()
+}
+
 // CharacterFilter Tests
 
 #[cfg(test)]
@@ -433,86 +450,85 @@ mod token_filter_tests {
         #[test]
         fn test_already_lowercase() {
             let filter = LowerCaseTokenFilter;
-            let tokens = vec!["hello".to_string(), "world".to_string()];
+            let tokens = make_tokens(vec!["hello", "world"]);
             let result = filter.filter(tokens);
-            assert_eq!(result, vec!["hello", "world"]);
+            assert_eq!(extract_terms(&result), vec!["hello", "world"]);
         }
 
         #[test]
         fn test_uppercase_to_lowercase() {
             let filter = LowerCaseTokenFilter;
-            let tokens = vec!["HELLO".to_string(), "WORLD".to_string()];
+            let tokens = make_tokens(vec!["HELLO", "WORLD"]);
             let result = filter.filter(tokens);
-            assert_eq!(result, vec!["hello", "world"]);
+            assert_eq!(extract_terms(&result), vec!["hello", "world"]);
         }
 
         #[test]
         fn test_mixed_case() {
             let filter = LowerCaseTokenFilter;
-            let tokens = vec!["HeLLo".to_string(), "WoRLd".to_string()];
+            let tokens = make_tokens(vec!["HeLLo", "WoRLd"]);
             let result = filter.filter(tokens);
-            assert_eq!(result, vec!["hello", "world"]);
+            assert_eq!(extract_terms(&result), vec!["hello", "world"]);
         }
 
         #[test]
         fn test_with_punctuation() {
             let filter = LowerCaseTokenFilter;
-            let tokens = vec!["Hello!".to_string(), "WORLD?".to_string()];
+            let tokens = make_tokens(vec!["Hello!", "WORLD?"]);
             let result = filter.filter(tokens);
-            assert_eq!(result, vec!["hello!", "world?"]);
+            assert_eq!(extract_terms(&result), vec!["hello!", "world?"]);
         }
 
         #[test]
         fn test_numbers_unchanged() {
             let filter = LowerCaseTokenFilter;
-            let tokens = vec!["Test123".to_string(), "456TEST".to_string()];
+            let tokens = make_tokens(vec!["Test123", "456TEST"]);
             let result = filter.filter(tokens);
-            assert_eq!(result, vec!["test123", "456test"]);
+            assert_eq!(extract_terms(&result), vec!["test123", "456test"]);
         }
 
         #[test]
         fn test_unicode_lowercase() {
             let filter = LowerCaseTokenFilter;
-            let tokens = vec!["CAFÉ".to_string(), "MÜNCHEN".to_string()];
+            let tokens = make_tokens(vec!["CAFÉ", "MÜNCHEN"]);
             let result = filter.filter(tokens);
-            assert_eq!(result, vec!["café", "münchen"]);
+            assert_eq!(extract_terms(&result), vec!["café", "münchen"]);
         }
 
         #[test]
         fn test_preserves_order() {
             let filter = LowerCaseTokenFilter;
-            let tokens = vec![
-                "First".to_string(),
-                "Second".to_string(),
-                "Third".to_string(),
-            ];
+            let tokens = make_tokens(vec!["First", "Second", "Third"]);
             let result = filter.filter(tokens);
-            assert_eq!(result, vec!["first", "second", "third"]);
+            assert_eq!(extract_terms(&result), vec!["first", "second", "third"]);
         }
 
         #[test]
         fn test_empty_strings() {
             let filter = LowerCaseTokenFilter;
-            let tokens = vec!["".to_string(), "Test".to_string(), "".to_string()];
+            let tokens = make_tokens(vec!["", "Test", ""]);
             let result = filter.filter(tokens);
-            assert_eq!(result, vec!["", "test", ""]);
+            assert_eq!(extract_terms(&result), vec!["", "test", ""]);
         }
 
         #[test]
         fn test_special_chars() {
             let filter = LowerCaseTokenFilter;
-            let tokens = vec!["@TEST".to_string(), "#HELLO".to_string()];
+            let tokens = make_tokens(vec!["@TEST", "#HELLO"]);
             let result = filter.filter(tokens);
-            assert_eq!(result, vec!["@test", "#hello"]);
+            assert_eq!(extract_terms(&result), vec!["@test", "#hello"]);
         }
 
         #[test]
         fn test_very_long_token() {
             let filter = LowerCaseTokenFilter;
             let long_token = "A".repeat(10000);
-            let tokens = vec![long_token];
+            let tokens = vec![TextToken {
+                term: long_token,
+                pos: 0,
+            }];
             let result = filter.filter(tokens);
-            assert_eq!(result[0], "a".repeat(10000));
+            assert_eq!(result[0].term, "a".repeat(10000));
         }
     }
 
@@ -529,44 +545,28 @@ mod token_filter_tests {
         #[test]
         fn test_removes_common_stopwords() {
             let filter = StopWordTokenFilter;
-            let tokens = vec![
-                "the".to_string(),
-                "quick".to_string(),
-                "brown".to_string(),
-                "fox".to_string(),
-            ];
+            let tokens = make_tokens(vec!["the", "quick", "brown", "fox"]);
             let result = filter.filter(tokens);
-            assert!(!result.contains(&"the".to_string()));
-            assert!(result.contains(&"quick".to_string()));
-            assert!(result.contains(&"brown".to_string()));
-            assert!(result.contains(&"fox".to_string()));
+            let terms = extract_terms(&result);
+            assert!(!terms.contains(&"the".to_string()));
+            assert!(terms.contains(&"quick".to_string()));
+            assert!(terms.contains(&"brown".to_string()));
+            assert!(terms.contains(&"fox".to_string()));
         }
 
         #[test]
         fn test_removes_multiple_stopwords() {
             let filter = StopWordTokenFilter;
-            let tokens = vec![
-                "the".to_string(),
-                "a".to_string(),
-                "an".to_string(),
-                "and".to_string(),
-                "or".to_string(),
-                "word".to_string(),
-            ];
+            let tokens = make_tokens(vec!["the", "a", "an", "and", "or", "word"]);
             let result = filter.filter(tokens);
             assert_eq!(result.len(), 1);
-            assert_eq!(result[0], "word");
+            assert_eq!(result[0].term, "word");
         }
 
         #[test]
         fn test_all_stopwords() {
             let filter = StopWordTokenFilter;
-            let tokens = vec![
-                "the".to_string(),
-                "a".to_string(),
-                "is".to_string(),
-                "at".to_string(),
-            ];
+            let tokens = make_tokens(vec!["the", "a", "is", "at"]);
             let result = filter.filter(tokens);
             assert_eq!(result.len(), 0);
         }
@@ -574,7 +574,7 @@ mod token_filter_tests {
         #[test]
         fn test_no_stopwords() {
             let filter = StopWordTokenFilter;
-            let tokens = vec!["quick".to_string(), "brown".to_string(), "fox".to_string()];
+            let tokens = make_tokens(vec!["quick", "brown", "fox"]);
             let result = filter.filter(tokens);
             assert_eq!(result.len(), 3);
         }
@@ -583,83 +583,60 @@ mod token_filter_tests {
         fn test_case_sensitive() {
             let filter = StopWordTokenFilter;
             // Stopwords are typically lowercase, so "The" might not be removed
-            let tokens = vec!["The".to_string(), "quick".to_string()];
+            let tokens = make_tokens(vec!["The", "quick"]);
             let result = filter.filter(tokens);
+            let terms = extract_terms(&result);
             // This tests whether the filter is case-sensitive
             // If case-insensitive, result would be ["quick"]
             // If case-sensitive, result would be ["The", "quick"]
-            assert!(result.contains(&"quick".to_string()));
+            assert!(terms.contains(&"quick".to_string()));
         }
 
         #[test]
         fn test_preserves_order() {
             let filter = StopWordTokenFilter;
-            let tokens = vec![
-                "apple".to_string(),
-                "the".to_string(),
-                "banana".to_string(),
-                "and".to_string(),
-                "cherry".to_string(),
-            ];
+            let tokens = make_tokens(vec!["apple", "the", "banana", "and", "cherry"]);
             let result = filter.filter(tokens);
-            assert_eq!(result, vec!["apple", "banana", "cherry"]);
+            assert_eq!(extract_terms(&result), vec!["apple", "banana", "cherry"]);
         }
 
         #[test]
         fn test_duplicates_preserved() {
             let filter = StopWordTokenFilter;
-            let tokens = vec![
-                "apple".to_string(),
-                "apple".to_string(),
-                "the".to_string(),
-                "apple".to_string(),
-            ];
+            let tokens = make_tokens(vec!["apple", "apple", "the", "apple"]);
             let result = filter.filter(tokens);
             assert_eq!(result.len(), 3);
-            assert!(result.iter().all(|t| t == "apple"));
+            assert!(result.iter().all(|t| t.term == "apple"));
         }
 
         #[test]
         fn test_with_punctuation() {
             let filter = StopWordTokenFilter;
-            let tokens = vec![
-                "the".to_string(),
-                "word!".to_string(),
-                "and".to_string(),
-                "another?".to_string(),
-            ];
+            let tokens = make_tokens(vec!["the", "word!", "and", "another?"]);
             let result = filter.filter(tokens);
+            let terms = extract_terms(&result);
             // Stopwords with punctuation should NOT be removed
-            assert!(result.contains(&"word!".to_string()));
-            assert!(result.contains(&"another?".to_string()));
+            assert!(terms.contains(&"word!".to_string()));
+            assert!(terms.contains(&"another?".to_string()));
         }
 
         #[test]
         fn test_numbers_and_stopwords() {
             let filter = StopWordTokenFilter;
-            let tokens = vec![
-                "the".to_string(),
-                "123".to_string(),
-                "and".to_string(),
-                "456".to_string(),
-            ];
+            let tokens = make_tokens(vec!["the", "123", "and", "456"]);
             let result = filter.filter(tokens);
-            assert_eq!(result, vec!["123", "456"]);
+            assert_eq!(extract_terms(&result), vec!["123", "456"]);
         }
 
         #[test]
         fn test_empty_strings() {
             let filter = StopWordTokenFilter;
-            let tokens = vec![
-                "".to_string(),
-                "the".to_string(),
-                "".to_string(),
-                "word".to_string(),
-            ];
+            let tokens = make_tokens(vec!["", "the", "", "word"]);
             let result = filter.filter(tokens);
-            assert!(result.contains(&"".to_string()));
-            assert!(result.contains(&"word".to_string()));
-            assert!(!result.contains(&"the".to_string()));
+            let terms = extract_terms(&result);
+            assert!(terms.contains(&"".to_string()));
+            assert!(terms.contains(&"word".to_string()));
+            assert!(!terms.contains(&"the".to_string()));
         }
     }
 
@@ -676,51 +653,43 @@ mod token_filter_tests {
         #[test]
         fn test_basic_stemming() {
             let filter = PorterStemmerTokenFilter;
-            let tokens = vec!["running".to_string(), "runs".to_string(), "run".to_string()];
+            let tokens = make_tokens(vec!["running", "runs", "run"]);
             let result = filter.filter(tokens);
             // All should stem to "run"
-            assert!(result.iter().all(|t| t == "run"));
+            assert!(result.iter().all(|t| t.term == "run"));
         }
 
         #[test]
         fn test_plural_to_singular() {
             let filter = PorterStemmerTokenFilter;
-            let tokens = vec!["cats".to_string(), "dogs".to_string()];
+            let tokens = make_tokens(vec!["cats", "dogs"]);
             let result = filter.filter(tokens);
-            assert_eq!(result[0], "cat");
-            assert_eq!(result[1], "dog");
+            assert_eq!(result[0].term, "cat");
+            assert_eq!(result[1].term, "dog");
         }
 
         #[test]
         fn test_verb_forms() {
             let filter = PorterStemmerTokenFilter;
-            let tokens = vec![
-                "fishing".to_string(),
-                "fished".to_string(),
-                "fisher".to_string(),
-            ];
+            let tokens = make_tokens(vec!["fishing", "fished", "fisher"]);
             let result = filter.filter(tokens);
             // All should stem to similar form
-            assert!(result.iter().all(|t| t.starts_with("fish")));
+            assert!(result.iter().all(|t| t.term.starts_with("fish")));
         }
 
         #[test]
         fn test_adjective_forms() {
             let filter = PorterStemmerTokenFilter;
-            let tokens = vec![
-                "happy".to_string(),
-                "happiness".to_string(),
-                "happier".to_string(),
-            ];
+            let tokens = make_tokens(vec!["happy", "happiness", "happier"]);
             let result = filter.filter(tokens);
             // All should stem to similar form
-            assert!(result.iter().all(|t| t.starts_with("happi")));
+            assert!(result.iter().all(|t| t.term.starts_with("happi")));
         }
 
         #[test]
         fn test_preserves_short_words() {
             let filter = PorterStemmerTokenFilter;
-            let tokens = vec!["is".to_string(), "at".to_string(), "it".to_string()];
+            let tokens = make_tokens(vec!["is", "at", "it"]);
             let result = filter.filter(tokens);
             // Short words typically unchanged
             assert_eq!(result.len(), 3);
@@ -729,17 +698,17 @@ mod token_filter_tests {
         #[test]
         fn test_already_stemmed() {
             let filter = PorterStemmerTokenFilter;
-            let tokens = vec!["run".to_string(), "jump".to_string()];
+            let tokens = make_tokens(vec!["run", "jump"]);
             let result = filter.filter(tokens);
             // Already in base form
-            assert_eq!(result[0], "run");
-            assert_eq!(result[1], "jump");
+            assert_eq!(result[0].term, "run");
+            assert_eq!(result[1].term, "jump");
         }
 
         #[test]
         fn test_with_punctuation() {
             let filter = PorterStemmerTokenFilter;
-            let tokens = vec!["running!".to_string(), "runs?".to_string()];
+            let tokens = make_tokens(vec!["running!", "runs?"]);
             let result = filter.filter(tokens);
             // Punctuation might affect stemming
             assert_eq!(result.len(), 2);
@@ -748,7 +717,7 @@ mod token_filter_tests {
         #[test]
         fn test_uppercase() {
             let filter = PorterStemmerTokenFilter;
-            let tokens = vec!["RUNNING".to_string(), "RUNS".to_string()];
+            let tokens = make_tokens(vec!["RUNNING", "RUNS"]);
             let result = filter.filter(tokens);
             // Porter stemmer might handle case differently
             assert_eq!(result.len(), 2);
@@ -757,42 +726,34 @@ mod token_filter_tests {
         #[test]
         fn test_empty_string() {
             let filter = PorterStemmerTokenFilter;
-            let tokens = vec!["".to_string()];
+            let tokens = make_tokens(vec![""]);
             let result = filter.filter(tokens);
-            assert_eq!(result[0], "");
+            assert_eq!(result[0].term, "");
         }
 
         #[test]
         fn test_numbers() {
             let filter = PorterStemmerTokenFilter;
-            let tokens = vec!["123".to_string(), "456".to_string()];
+            let tokens = make_tokens(vec!["123", "456"]);
             let result = filter.filter(tokens);
             // Numbers should remain unchanged
-            assert_eq!(result[0], "123");
-            assert_eq!(result[1], "456");
+            assert_eq!(result[0].term, "123");
+            assert_eq!(result[1].term, "456");
         }
 
         #[test]
         fn test_complex_words() {
             let filter = PorterStemmerTokenFilter;
-            let tokens = vec![
-                "complicated".to_string(),
-                "complication".to_string(),
-                "complicating".to_string(),
-            ];
+            let tokens = make_tokens(vec!["complicated", "complication", "complicating"]);
             let result = filter.filter(tokens);
             // All should stem to similar form
-            assert!(result.iter().all(|t| t.starts_with("complic")));
+            assert!(result.iter().all(|t| t.term.starts_with("complic")));
         }
 
         #[test]
         fn test_preserves_order() {
             let filter = PorterStemmerTokenFilter;
-            let tokens = vec![
-                "first".to_string(),
-                "second".to_string(),
-                "third".to_string(),
-            ];
+            let tokens = make_tokens(vec!["first", "second", "third"]);
             let result = filter.filter(tokens);
             assert_eq!(result.len(), 3);
         }
@@ -800,37 +761,29 @@ mod token_filter_tests {
         #[test]
         fn test_ed_ing_suffixes() {
             let filter = PorterStemmerTokenFilter;
-            let tokens = vec![
-                "walked".to_string(),
-                "walking".to_string(),
-                "walk".to_string(),
-            ];
+            let tokens = make_tokens(vec!["walked", "walking", "walk"]);
             let result = filter.filter(tokens);
             // All should stem to "walk"
-            assert!(result.iter().all(|t| t == "walk"));
+            assert!(result.iter().all(|t| t.term == "walk"));
         }
 
         #[test]
         fn test_ies_suffix() {
             let filter = PorterStemmerTokenFilter;
-            let tokens = vec!["flies".to_string(), "tries".to_string()];
+            let tokens = make_tokens(vec!["flies", "tries"]);
             let result = filter.filter(tokens);
-            assert_eq!(result[0], "fli");
-            assert_eq!(result[1], "tri");
+            assert_eq!(result[0].term, "fli");
+            assert_eq!(result[1].term, "tri");
         }
 
         #[test]
         fn test_ational_suffix() {
             let filter = PorterStemmerTokenFilter;
-            let tokens = vec![
-                "relational".to_string(),
-                "conditional".to_string(),
-                "rational".to_string(),
-            ];
+            let tokens = make_tokens(vec!["relational", "conditional", "rational"]);
             let result = filter.filter(tokens);
             assert_eq!(result.len(), 3);
             // These should be stemmed
-            assert!(result.iter().all(|t| t.len() < 10));
+            assert!(result.iter().all(|t| t.term.len() < 10));
         }
     }
 
@@ -840,13 +793,14 @@ mod token_filter_tests {
         let lowercase = LowerCaseTokenFilter;
         let stopword = StopWordTokenFilter;
 
-        let tokens = vec!["The".to_string(), "QUICK".to_string(), "Brown".to_string()];
+        let tokens = make_tokens(vec!["The", "QUICK", "Brown"]);
         let tokens = lowercase.filter(tokens);
         let result = stopword.filter(tokens);
+        let terms = extract_terms(&result);
 
-        assert!(!result.contains(&"the".to_string()));
-        assert!(result.contains(&"quick".to_string()));
-        assert!(result.contains(&"brown".to_string()));
+        assert!(!terms.contains(&"the".to_string()));
+        assert!(terms.contains(&"quick".to_string()));
+        assert!(terms.contains(&"brown".to_string()));
     }
 
     #[test]
@@ -855,14 +809,15 @@ mod token_filter_tests {
         let stopword = StopWordTokenFilter;
         let stemmer = PorterStemmerTokenFilter;
 
-        let tokens = vec!["The".to_string(), "RUNNING".to_string(), "Dogs".to_string()];
+        let tokens = make_tokens(vec!["The", "RUNNING", "Dogs"]);
         let tokens = lowercase.filter(tokens);
         let tokens = stopword.filter(tokens);
         let result = stemmer.filter(tokens);
+        let terms = extract_terms(&result);
 
         assert_eq!(result.len(), 2);
-        assert!(result.contains(&"run".to_string()));
-        assert!(result.contains(&"dog".to_string()));
+        assert!(terms.contains(&"run".to_string()));
+        assert!(terms.contains(&"dog".to_string()));
     }
 
     #[test]
@@ -871,26 +826,18 @@ mod token_filter_tests {
         let stopword = StopWordTokenFilter;
         let stemmer = PorterStemmerTokenFilter;
 
-        let tokens = vec![
-            "The".to_string(),
-            "Quick".to_string(),
-            "Brown".to_string(),
-            "Foxes".to_string(),
-            "are".to_string(),
-            "Jumping".to_string(),
-            "over".to_string(),
-            "the".to_string(),
-            "Lazy".to_string(),
-            "Dogs".to_string(),
-        ];
+        let tokens = make_tokens(vec![
+            "The", "Quick", "Brown", "Foxes", "are", "Jumping", "over", "the", "Lazy", "Dogs",
+        ]);
 
         let tokens = lowercase.filter(tokens);
         let tokens = stopword.filter(tokens);
         let result = stemmer.filter(tokens);
+        let terms = extract_terms(&result);
 
         // Should have: quick, brown, foxes->fox, jumping->jump, lazy, dogs->dog
         assert!(result.len() <= 6);
-        assert!(result.contains(&"quick".to_string()));
-        assert!(result.contains(&"brown".to_string()));
+        assert!(terms.contains(&"quick".to_string()));
+        assert!(terms.contains(&"brown".to_string()));
     }
 }
