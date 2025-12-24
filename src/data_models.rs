@@ -109,12 +109,12 @@ impl SpimiDoc {
 pub struct InvertedIndexDoc {
     #[serde(rename = "_id")]
     pub id: ObjectId,
-    term: String,
-    bucket: i16,
-    document_frequency: u64,
-    postings: Vec<ObjectId>,
+    pub term: String,
+    pub bucket: i16,
+    pub document_frequency: u64,
+    pub postings: Vec<ObjectId>,
     #[serde(with = "objectid_hashmap_serde")]
-    positions: HashMap<ObjectId, Vec<usize>>,
+    pub positions: HashMap<ObjectId, Vec<usize>>,
 }
 
 impl InvertedIndexDoc {

@@ -43,12 +43,16 @@ use crate::db::PageRepo;
 ///
 
 const DOCID_BYTES: usize = size_of::<ObjectId>();
-const DOCIDS_PER_MONGO_DOCUMENT: usize = 1_000_000;
+/// Maximum number of document IDs per MongoDB document.
+/// MongoDB has a 16MB document limit. With ObjectIds (12 bytes each) plus
+/// positions (HashMap with Vec<usize>), each entry uses roughly 50 bytes.
+/// 100K entries * 50 bytes = 5MB, providing safe margin under 16MB.
+const DOCIDS_PER_MONGO_DOCUMENT: usize = 100_000;
 
 pub struct Token {
-    term: String,
-    doc_id: ObjectId,
-    pos: usize,
+    pub term: String,
+    pub doc_id: ObjectId,
+    pub pos: usize,
 }
 
 pub enum StreamMsg {
