@@ -12,6 +12,7 @@ use std::collections::BinaryHeap;
 use std::collections::HashMap;
 use std::hash::Hash;
 use std::sync::Arc;
+use tokio::stream;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 
@@ -421,55 +422,62 @@ impl Indexer {
         let mut terms_merged = 0;
         let mut docs_written = 0;
 
-        // BUG: it will create two docs in inverted index, even if the same term appears in two different spimi block collections
-        // these two docs will have same bucket though which is CORRECT.
+        // STATE TRACKING
         let mut current_postings = vec![];
         let mut current_positions = HashMap::new();
         let mut bucket = 0_i16;
-        let mut last_term: String = "".to_string();
-        while let Some(Reverse(item)) = min_terms.pop() {
-            let cursor = &mut streamers[item.streamer_idx];
-            // let this_postings = item.doc.postings;
-            current_postings = merge_sorted_lists(&current_postings, &item.doc.postings);
-            current_positions = merge_hashmaps(current_positions, item.doc.positions);
-            bucket = 0;
-            last_term = item.term.clone();
-            while let Some(spimi_doc) = cursor.next().await {
-                let doc = spimi_doc.unwrap();
-                last_term = doc.term.clone();
-                if doc.term != item.term {
-                    min_terms.push(Reverse(HeapItem {
-                        term: doc.term.clone(),
-                        streamer_idx: item.streamer_idx,
-                        doc,
-                    }));
-                    break;
-                }
+        let mut active_term: Option<String> = Option::None;
 
-                let postings = doc.postings;
-                let result_postings = merge_sorted_lists(&current_postings, &postings);
-                current_postings = result_postings;
-                current_positions = merge_hashmaps(current_positions, doc.positions);
-                if current_postings.len() >= DOCIDS_PER_MONGO_DOCUMENT {
-                    let doc = InvertedIndexDoc::new(
-                        item.term.clone(),
-                        bucket,
-                        current_postings.len() as u64,
-                        current_postings.clone(),
-                        HashMap::new(),
-                    );
-                    self.db
-                        .collection::<InvertedIndexDoc>("inverted_index")
-                        .insert_one(doc)
-                        .await
-                        .unwrap();
-                    docs_written += 1;
-                    bucket += 1;
-                    current_postings.clear();
+        while let Some(Reverse(item)) = min_terms.pop() {
+            // let this_postings = item.doc.postings;
+            let doc = item.doc;
+
+            // BUG: What happens when the term changes and we have not inserted what we had collected so far?
+            //
+            if let Some(ref term) = active_term {
+                if *term != doc.term {
+                    // we are done with the old term across all blocks
+                    self.flush_term_to_db(
+                        term,
+                        &mut current_postings,
+                        &mut current_positions,
+                        &mut bucket,
+                        &mut docs_written,
+                    )
+                    .await?;
                     current_positions.clear();
+                    current_postings.clear();
+                    bucket = 0;
                 }
             }
+            active_term = Some(doc.term.clone());
+            let merged_postings = merge_sorted_lists_dedup(&current_postings, &doc.postings);
+            current_postings = merged_postings;
+            current_positions = merge_hashmaps(current_positions, doc.positions);
 
+            if current_postings.len() >= DOCIDS_PER_MONGO_DOCUMENT {
+                self.flush_term_to_db(
+                    active_term.as_ref().unwrap(),
+                    &mut current_postings,
+                    &mut current_positions,
+                    &mut bucket,
+                    &mut docs_written,
+                )
+                .await?;
+                current_postings.clear();
+                current_positions.clear();
+            }
+
+            // ADVANCE the streamer where this term came from.
+            let cursor = &mut streamers[item.streamer_idx];
+            if cursor.has_next() {
+                let next_spimi = cursor.next().await.unwrap().unwrap();
+                min_terms.push(Reverse(HeapItem {
+                    term: next_spimi.term.clone(),
+                    streamer_idx: item.streamer_idx,
+                    doc: next_spimi,
+                }));
+            }
             terms_merged += 1;
             if terms_merged % 10_000 == 0 {
                 log::info!(
@@ -480,21 +488,17 @@ impl Indexer {
             }
         }
 
-        if current_postings.len() > 0 {
-            let df = current_postings.len() as u64;
-            let doc = InvertedIndexDoc::new(
-                last_term,
-                bucket,
-                df,
-                current_postings.clone(),
-                current_positions,
-            );
-            self.db
-                .collection::<InvertedIndexDoc>("inverted_index")
-                .insert_one(doc)
-                .await
-                .unwrap();
-            docs_written += 1;
+        if let Some(last_term) = active_term {
+            if !current_postings.is_empty() {
+                self.flush_term_to_db(
+                    &last_term,
+                    &mut current_postings,
+                    &mut current_positions,
+                    &mut bucket,
+                    &mut docs_written,
+                )
+                .await?;
+            }
         }
 
         log::info!(
@@ -552,11 +556,45 @@ impl Indexer {
         );
         Ok(())
     }
+
+    async fn flush_term_to_db(
+        &self,
+        term: &str,
+        postings: &mut Vec<ObjectId>,
+        positions: &mut HashMap<ObjectId, Vec<usize>>,
+        bucket: &mut i16,
+        docs_written: &mut usize,
+    ) -> Result<()> {
+        if postings.is_empty() {
+            return Ok(());
+        }
+
+        let doc = InvertedIndexDoc::new(
+            term.to_string(),
+            *bucket,
+            postings.len() as u64,
+            postings.clone(),
+            positions.clone(),
+        );
+
+        self.db
+            .collection::<InvertedIndexDoc>("inverted_index")
+            .insert_one(doc)
+            .await
+            .unwrap();
+
+        *docs_written += 1;
+        *bucket += 1;
+        Ok(())
+    }
 }
 
+// Helper to keep the main loop clean
 
-fn merge_hashmaps(mut map_a: HashMap<ObjectId, Vec<usize>>, map_b: HashMap<ObjectId, Vec<usize>>) -> HashMap<ObjectId, Vec<usize>> {
-
+fn merge_hashmaps(
+    mut map_a: HashMap<ObjectId, Vec<usize>>,
+    map_b: HashMap<ObjectId, Vec<usize>>,
+) -> HashMap<ObjectId, Vec<usize>> {
     for (doc_id, mut new_positions) in map_b {
         match map_a.entry(doc_id) {
             std::collections::hash_map::Entry::Vacant(e) => {
@@ -569,7 +607,6 @@ fn merge_hashmaps(mut map_a: HashMap<ObjectId, Vec<usize>>, map_b: HashMap<Objec
         }
     }
     map_a
-
 }
 
 struct HeapItem {
@@ -594,15 +631,13 @@ impl PartialOrd for HeapItem {
 
 impl Ord for HeapItem {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        // min-heap: reverse the whole ordering
-        other
-            .term
-            .cmp(&self.term)
-            .then_with(|| other.streamer_idx.cmp(&self.streamer_idx))
+        self.term
+            .cmp(&other.term)
+            .then_with(|| self.streamer_idx.cmp(&other.streamer_idx))
     }
 }
 
-pub fn merge_sorted_lists<T>(list_a: &Vec<T>, list_b: &Vec<T>) -> Vec<T>
+pub fn merge_sorted_lists_dedup<T>(list_a: &Vec<T>, list_b: &Vec<T>) -> Vec<T>
 where
     T: PartialOrd + Clone + Copy,
 {
@@ -613,12 +648,18 @@ where
         if list_a[a_ptr] < list_b[b_ptr] {
             res.push(list_a[a_ptr]);
             a_ptr += 1;
-        } else {
+        } else if list_a[a_ptr] > list_b[b_ptr] {
             res.push(list_b[b_ptr]);
+            b_ptr += 1;
+        } else {
+            // EQUAL
+            res.push(list_a[a_ptr]);
+            a_ptr += 1;
             b_ptr += 1;
         }
     }
 
+    // AS we are assuming both the lists themselves are free of duplicates, we don't need any extra handling here.
     while a_ptr < list_a.len() {
         res.push(list_a[a_ptr]);
         a_ptr += 1;

@@ -2,14 +2,14 @@ use anyhow::Result;
 use futures::stream::TryStreamExt;
 use mongodb::bson::oid::ObjectId;
 use mongodb::bson::{Document, doc};
+use serde_json::json;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::sync::Arc;
-use serde_json::json;
 
 use harvest::data_models::{InvertedIndexDoc, Page, SpimiDoc};
 use harvest::db::{Database, PageRepo};
-use harvest::indexer::{DictItem, Indexer, SpimiBlock, merge_sorted_lists};
+use harvest::indexer::{DictItem, Indexer, SpimiBlock, merge_sorted_lists_dedup};
 
 /// Constant matching the one in indexer.rs for test verification.
 /// MongoDB has a 16MB document limit, so we use 100K docs per chunk (~5MB documents).
@@ -710,7 +710,7 @@ async fn test_persist_block_to_disk_single_term_300k_docs() -> Result<()> {
     let docs = get_spimi_docs_from_collection(
         &db,
         spimi_collection,
-        Some(doc! {"id": 1, "term": 1, "document_frequency": 1, "bucket": 1, "postings": 1}),
+        Option::None,
     )
     .await?;
 
@@ -774,7 +774,7 @@ async fn test_persist_block_to_disk_exactly_100k_docs() -> Result<()> {
     let docs = get_spimi_docs_from_collection(
         &db,
         &collections[0],
-        Some(doc! { "id": 1, "bucket": 1, "postings": 1}),
+        Option::None,
     )
     .await?;
 
@@ -808,7 +808,7 @@ async fn test_persist_block_to_disk_100k_plus_1_docs() -> Result<()> {
     let docs = get_spimi_docs_from_collection(
         &db,
         &collections[0],
-        Some(doc! { "id": 1, "bucket": 1, "postings": 1}),
+        Option::None,
     )
     .await?;
 
@@ -866,7 +866,7 @@ async fn test_persist_block_to_disk_multiple_terms_multi_bucket() -> Result<()> 
     let docs = get_spimi_docs_from_collection(
         &db,
         &collections[0],
-        Some(doc! {"id": 1, "term": 1, "postings": 1}),
+        Option::None
     )
     .await?;
 
@@ -1072,7 +1072,7 @@ async fn test_persist_block_to_disk_term_not_in_dictionary() -> Result<()> {
     // Verify only real_term was persisted
     let collections = get_spimi_block_collection_names(&db).await?;
     let docs =
-        get_spimi_docs_from_collection(&db, &collections[0], Some(doc! {"id": 1, "term": 1}))
+        get_spimi_docs_from_collection(&db, &collections[0], Option::None)
             .await?;
 
     assert_eq!(docs.len(), 1, "Only real_term should be persisted");
@@ -1100,7 +1100,7 @@ async fn test_persist_block_to_disk_single_term_500k_docs() -> Result<()> {
     let docs = get_spimi_docs_from_collection(
         &db,
         &collections[0],
-        Some(doc! {"id": 1, "bucket": 1, "postings": 1}),
+        Option::None,
     )
     .await?;
 
@@ -1226,7 +1226,7 @@ fn test_merge_sorted_lists_with_object_ids() {
     let list_a = vec![id1, id3];
     let list_b = vec![id2, id4];
 
-    let result = merge_sorted_lists(&list_a, &list_b);
+    let result = merge_sorted_lists_dedup(&list_a, &list_b);
     assert_eq!(result, vec![id1, id2, id3, id4]);
 }
 
@@ -1235,7 +1235,7 @@ fn test_merge_sorted_lists_large_lists() {
     let list_a: Vec<i32> = (0..1000).step_by(2).collect();
     let list_b: Vec<i32> = (1..1000).step_by(2).collect();
 
-    let result = merge_sorted_lists(&list_a, &list_b);
+    let result = merge_sorted_lists_dedup(&list_a, &list_b);
 
     assert_eq!(result.len(), list_a.len() + list_b.len());
     for i in 1..result.len() {
@@ -1243,14 +1243,6 @@ fn test_merge_sorted_lists_large_lists() {
     }
 }
 
-#[test]
-fn test_merge_sorted_lists_all_same_elements() {
-    let list_a = vec![5, 5, 5, 5];
-    let list_b = vec![5, 5, 5];
-
-    let result = merge_sorted_lists(&list_a, &list_b);
-    assert_eq!(result, vec![5, 5, 5, 5, 5, 5, 5]);
-}
 
 // SpimiBlock tests
 #[test]
@@ -1462,7 +1454,7 @@ async fn test_merge_persisted_blocks_interleaved_terms() -> Result<()> {
     indexer.merge_persisted_blocks().await?;
 
     // Verify all 6 terms exist in inverted index
-    let all_docs = get_inverted_index_docs(&db, Some(doc! {"id": 1, "term": 1})).await?;
+    let all_docs = get_inverted_index_docs(&db, Option::None).await?;
     let unique_terms: std::collections::HashSet<String> =
         all_docs.iter().map(|d| d.term.clone()).collect();
 
@@ -1774,9 +1766,14 @@ async fn test_merge_persisted_blocks_single_block() -> Result<()> {
     indexer.merge_persisted_blocks().await?;
 
     // Verify all terms in inverted index
-    let all_docs = get_inverted_index_docs(&db, Option::None).await?;
+    let all_docs = get_inverted_index_docs(
+        &db,
+        Option::None
+    )
+    .await?;
     let terms: std::collections::HashSet<String> =
         all_docs.iter().map(|d| d.term.clone()).collect();
+    println!("all terms: {:?}", terms);
 
     assert!(terms.contains("single_alpha"));
     assert!(terms.contains("single_beta"));
@@ -2183,6 +2180,9 @@ async fn test_integration_shared_documents_across_blocks() -> Result<()> {
 
     // Verify shared_term
     let shared_docs_result = get_inverted_index_docs_for_term(&db, "shared_term").await?;
+    for doc in &shared_docs_result {
+        println!("doc: bucket: {}, postings: {}", doc.bucket, doc.postings.len());
+    }
     assert_eq!(
         shared_docs_result.len(),
         1,
@@ -2195,12 +2195,16 @@ async fn test_integration_shared_documents_across_blocks() -> Result<()> {
     // So we expect 1000 * 6 = 6000 postings, not 1000 unique
     // This matches the actual merge behavior in the code
     assert!(
-        shared_doc.postings.len() >= 1000,
-        "shared_term should have at least 1000 postings"
+        shared_doc.postings.len() == 1000,
+        "shared_term should have exactly 1000 postings"
     );
+    println!("shared_doc postings: {}", shared_doc.postings.len());
 
     // Verify mixed_term has all unique docs from all blocks
     let mixed_docs = get_inverted_index_docs_for_term(&db, "mixed_term").await?;
+    for doc in &mixed_docs {
+        println!("mixed doc len: {}, bucket: {}",doc.postings.len(), doc.bucket);
+    }
     let mixed_total: usize = mixed_docs.iter().map(|d| d.postings.len()).sum();
     assert_eq!(
         mixed_total,
