@@ -456,16 +456,25 @@ impl Indexer {
             current_positions = merge_hashmaps(current_positions, doc.positions);
 
             if current_postings.len() >= DOCIDS_PER_MONGO_DOCUMENT {
+                let overflow_postings = current_postings.split_off(DOCIDS_PER_MONGO_DOCUMENT);
+                let mut flush_positions = HashMap::new();
+                for doc_id in &current_postings {
+                    // current only have the postings that we are going to flush.
+                    if let Some(pos) = current_positions.remove(doc_id) {
+                        // remove all these postions from `current_positions` because we are going to flush them.
+                        flush_positions.insert(*doc_id, pos);
+                    }
+                }
                 self.flush_term_to_db(
                     active_term.as_ref().unwrap(),
                     &mut current_postings,
-                    &mut current_positions,
+                    &mut flush_positions,
                     &mut bucket,
                     &mut docs_written,
                 )
                 .await?;
-                current_postings.clear();
-                current_positions.clear();
+                current_postings = overflow_postings;
+                // no need to do anything with `current_positions` as we have already removed.
             }
 
             // ADVANCE the streamer where this term came from.

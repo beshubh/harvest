@@ -1390,6 +1390,10 @@ async fn test_merge_persisted_blocks_6_blocks_500k_total_docs() -> Result<()> {
     // Verify inverted index has multiple buckets
     let docs = get_inverted_index_docs_for_term(&db, "large_term").await?;
 
+    for doc in &docs {
+        println!("dock: bucket: {}, postings: {}", doc.bucket, doc.postings.len());
+    }
+
     // ~504K docs should result in 5+ buckets
     let expected_buckets = (docs_per_block * 6) / DOCIDS_PER_MONGO_DOCUMENT;
     assert!(
@@ -1607,13 +1611,13 @@ async fn test_merge_persisted_blocks_final_flush() -> Result<()> {
     let pages_repo = Arc::new(PageRepo::new(&db));
     let indexer = Indexer::new(pages_repo, 100, db.clone());
 
-    // Create blocks with less than 1M total docs (won't trigger mid-merge flush)
+    // Create blocks with less than 100k total docs (won't trigger mid-merge flush)
     // Final flush is the only path that writes to inverted_index
-    let doc_ids_1 = generate_sorted_object_ids_with_prefix(100_000, 1);
+    let doc_ids_1 = generate_sorted_object_ids_with_prefix(40_000, 1);
     let block1 = create_large_block_single_term("final_flush_term", &doc_ids_1, 1);
     indexer.persist_block_to_disk(block1).await?;
 
-    let doc_ids_2 = generate_sorted_object_ids_with_prefix(100_000, 2);
+    let doc_ids_2 = generate_sorted_object_ids_with_prefix(40_000, 2);
     let block2 = create_large_block_single_term("final_flush_term", &doc_ids_2, 1);
     indexer.persist_block_to_disk(block2).await?;
 
@@ -1626,7 +1630,7 @@ async fn test_merge_persisted_blocks_final_flush() -> Result<()> {
 
     let doc = &docs[0];
     assert_eq!(doc.bucket, 0, "Final flush should write to bucket 0");
-    assert_eq!(doc.postings.len(), 200_000, "Should have 200K postings");
+    assert_eq!(doc.postings.len(), 80_000, "Should have 80K postings");
 
     cleanup_test_db(&db, &db_name).await?;
     Ok(())
@@ -1997,7 +2001,7 @@ async fn test_integration_full_indexer_flow() -> Result<()> {
     // STEP 6: Verify inverted index contents
     // ==========================================================================
 
-    let all_inverted_docs = get_inverted_index_docs(&db, Some(doc! {"id": 1, "term": 1})).await?;
+    let all_inverted_docs = get_inverted_index_docs(&db, Option::None).await?;
     assert!(
         !all_inverted_docs.is_empty(),
         "Inverted index should not be empty"
