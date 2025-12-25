@@ -10,6 +10,7 @@ use std::cmp::Reverse;
 use std::collections::BTreeMap;
 use std::collections::BinaryHeap;
 use std::collections::HashMap;
+use std::hash::Hash;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
@@ -420,13 +421,22 @@ impl Indexer {
         let mut terms_merged = 0;
         let mut docs_written = 0;
 
+        // BUG: it will create two docs in inverted index, even if the same term appears in two different spimi block collections
+        // these two docs will have same bucket though which is CORRECT.
+        let mut current_postings = vec![];
+        let mut current_positions = HashMap::new();
+        let mut bucket = 0_i16;
+        let mut last_term: String = "".to_string();
         while let Some(Reverse(item)) = min_terms.pop() {
             let cursor = &mut streamers[item.streamer_idx];
-            let mut current_postings = item.doc.postings;
-            let mut current_positions = item.doc.positions;
-            let mut bucket = 0_i16;
+            // let this_postings = item.doc.postings;
+            current_postings = merge_sorted_lists(&current_postings, &item.doc.postings);
+            current_positions = merge_hashmaps(current_positions, item.doc.positions);
+            bucket = 0;
+            last_term = item.term.clone();
             while let Some(spimi_doc) = cursor.next().await {
                 let doc = spimi_doc.unwrap();
+                last_term = doc.term.clone();
                 if doc.term != item.term {
                     min_terms.push(Reverse(HeapItem {
                         term: doc.term.clone(),
@@ -439,17 +449,7 @@ impl Indexer {
                 let postings = doc.postings;
                 let result_postings = merge_sorted_lists(&current_postings, &postings);
                 current_postings = result_postings;
-                for (doc_id, mut new_positions) in doc.positions {
-                    match current_positions.entry(doc_id) {
-                        std::collections::hash_map::Entry::Vacant(e) => {
-                            e.insert(new_positions);
-                        }
-                        std::collections::hash_map::Entry::Occupied(mut e) => {
-                            let x = e.get_mut();
-                            x.append(&mut new_positions);
-                        }
-                    }
-                }
+                current_positions = merge_hashmaps(current_positions, doc.positions);
                 if current_postings.len() >= DOCIDS_PER_MONGO_DOCUMENT {
                     let doc = InvertedIndexDoc::new(
                         item.term.clone(),
@@ -469,23 +469,6 @@ impl Indexer {
                     current_positions.clear();
                 }
             }
-            if current_postings.len() > 0 {
-                // TODO: fix positions and document_frequency
-                let df = current_postings.len() as u64;
-                let doc = InvertedIndexDoc::new(
-                    item.term.clone(),
-                    bucket,
-                    df,
-                    current_postings.clone(),
-                    current_positions,
-                );
-                self.db
-                    .collection::<InvertedIndexDoc>("inverted_index")
-                    .insert_one(doc)
-                    .await
-                    .unwrap();
-                docs_written += 1;
-            }
 
             terms_merged += 1;
             if terms_merged % 10_000 == 0 {
@@ -495,6 +478,23 @@ impl Indexer {
                     docs_written
                 );
             }
+        }
+
+        if current_postings.len() > 0 {
+            let df = current_postings.len() as u64;
+            let doc = InvertedIndexDoc::new(
+                last_term,
+                bucket,
+                df,
+                current_postings.clone(),
+                current_positions,
+            );
+            self.db
+                .collection::<InvertedIndexDoc>("inverted_index")
+                .insert_one(doc)
+                .await
+                .unwrap();
+            docs_written += 1;
         }
 
         log::info!(
@@ -552,6 +552,24 @@ impl Indexer {
         );
         Ok(())
     }
+}
+
+
+fn merge_hashmaps(mut map_a: HashMap<ObjectId, Vec<usize>>, map_b: HashMap<ObjectId, Vec<usize>>) -> HashMap<ObjectId, Vec<usize>> {
+
+    for (doc_id, mut new_positions) in map_b {
+        match map_a.entry(doc_id) {
+            std::collections::hash_map::Entry::Vacant(e) => {
+                e.insert(new_positions);
+            }
+            std::collections::hash_map::Entry::Occupied(mut e) => {
+                let x = e.get_mut();
+                x.append(&mut new_positions);
+            }
+        }
+    }
+    map_a
+
 }
 
 struct HeapItem {

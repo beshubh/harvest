@@ -5,6 +5,7 @@ use mongodb::bson::{Document, doc};
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::sync::Arc;
+use serde_json::json;
 
 use harvest::data_models::{InvertedIndexDoc, Page, SpimiDoc};
 use harvest::db::{Database, PageRepo};
@@ -1572,6 +1573,15 @@ async fn test_merge_persisted_blocks_positions_occupied_entry() -> Result<()> {
 
     // Verify positions were appended (Occupied entry path)
     let docs = get_inverted_index_docs_for_term(&db, "shared_docs_term").await?;
+    for doc in &docs {
+        let obj = json!({
+            "id": doc.id,
+            "term": doc.term,
+            "document_frequency": doc.document_frequency,
+            "bucket": doc.bucket
+        });
+        println!("doc in shared_docs_term: {:?}", obj);
+    }
     assert_eq!(docs.len(), 1, "Should have 1 bucket");
 
     let doc = &docs[0];
