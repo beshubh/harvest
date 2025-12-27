@@ -111,7 +111,6 @@ async fn run_crawl(
         pages_repo,
         max_concurrent_fetches,
         frontier_size,
-        max_concurrent_analysis,
     );
     let crawler = Arc::new(crawler);
 

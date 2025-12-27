@@ -48,6 +48,8 @@ pub struct Page {
     pub depth: u32,
     pub is_seed: bool,
     pub crawled_at: DateTime,
+    #[serde(default)]
+    pub indexed: bool,
 }
 
 impl Page {
@@ -69,6 +71,7 @@ impl Page {
             depth,
             is_seed,
             crawled_at: DateTime::now(),
+            indexed: false,
         }
     }
 }

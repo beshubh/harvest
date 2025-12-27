@@ -14,6 +14,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 
+use crate::analyzer::TextAnalyzer;
 use crate::data_models::InvertedIndexDoc;
 use crate::data_models::Page;
 use crate::data_models::SpimiDoc;
@@ -71,6 +72,7 @@ pub struct Indexer {
     page_fetch_limit: i64,
     token_stream_tx: mpsc::UnboundedSender<StreamMsg>,
     token_stream_rx: Mutex<mpsc::UnboundedReceiver<StreamMsg>>,
+    text_analyzer: Arc<TextAnalyzer>,
 }
 
 pub struct DictItem {
@@ -90,12 +92,24 @@ impl DictItem {
 impl Indexer {
     pub fn new(pages_repo: Arc<PageRepo>, page_fetch_limit: i64, db: Database) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
+        let text_analyzer = TextAnalyzer::new(
+            vec![Box::new(crate::analyzer::HTMLTagFilter::default())],
+            Box::new(crate::analyzer::WhiteSpaceTokenizer),
+            vec![
+                Box::new(crate::analyzer::PunctuationStripFilter::default()),
+                Box::new(crate::analyzer::LowerCaseTokenFilter),
+                Box::new(crate::analyzer::NumericTokenFilter),
+                Box::new(crate::analyzer::StopWordTokenFilter),
+                Box::new(crate::analyzer::PorterStemmerTokenFilter),
+            ],
+        );
         Self {
             page_fetch_limit,
             pages_repo,
             token_stream_tx: tx,
             token_stream_rx: Mutex::new(rx),
             db,
+            text_analyzer: Arc::new(text_analyzer),
         }
     }
 
@@ -107,10 +121,10 @@ impl Indexer {
 
         let (mut pages, mut cursor) = self
             .pages_repo
-            .list_paginated(self.page_fetch_limit, Option::None)
+            .list_unindexed_paginated(self.page_fetch_limit, Option::None)
             .await?;
 
-        log::info!("Fetched initial batch of {} pages", pages.len());
+        log::info!("Fetched initial batch of {} unindexed pages", pages.len());
 
         let self_clone = self.clone();
         tokio::spawn(async move {
@@ -118,12 +132,23 @@ impl Indexer {
             let mut total_pages_processed = 0;
             while pages.len() != 0 {
                 // Do text analysis first, then take those pages and do the indexing
-
                 total_pages_processed += pages.len();
+
+                // Collect page IDs before moving pages into Arc
+                let page_ids: Vec<ObjectId> = pages.iter().map(|p| p.id).collect();
                 let rc_pages = pages.into_iter().map(Arc::new).collect();
+
                 if let Err(e) = self_clone.pages_to_token_stream(&rc_pages) {
                     log::error!("Error converting pages to token stream: {:#}", e);
+                } else {
+                    // Mark pages as indexed after successful processing
+                    if let Err(e) = self_clone.pages_repo.mark_many_as_indexed(&page_ids).await {
+                        log::error!("Error marking pages as indexed: {:#}", e);
+                    } else {
+                        log::debug!("Marked {} pages as indexed", page_ids.len());
+                    }
                 }
+
                 log::debug!(
                     "Processed {} pages (total: {})",
                     rc_pages.len(),
@@ -132,7 +157,7 @@ impl Indexer {
 
                 let res = self_clone
                     .pages_repo
-                    .list_paginated(self_clone.page_fetch_limit, cursor)
+                    .list_unindexed_paginated(self_clone.page_fetch_limit, cursor)
                     .await;
                 if let Err(e) = res {
                     log::error!("Error fetching pages: {:#}", e);
@@ -158,17 +183,8 @@ impl Indexer {
     pub fn pages_to_token_stream(&self, pages: &Vec<Arc<Page>>) -> Result<()> {
         let token_stream = self.token_stream_tx.clone();
         let mut total_tokens = 0;
-        let text_analyzer = crate::analyzer::TextAnalyzer::new(
-            vec![Box::new(crate::analyzer::HTMLTagFilter::default())],
-            Box::new(crate::analyzer::WhiteSpaceTokenizer),
-            vec![
-                Box::new(crate::analyzer::PunctuationStripFilter::default()),
-                Box::new(crate::analyzer::LowerCaseTokenFilter),
-                Box::new(crate::analyzer::NumericTokenFilter),
-                Box::new(crate::analyzer::StopWordTokenFilter),
-                Box::new(crate::analyzer::PorterStemmerTokenFilter),
-            ],
-        );
+
+        let text_analyzer = self.text_analyzer.clone();
         for page in pages {
             let cleaned_terms = text_analyzer.analyze(page.html_body.clone())?;
             for text_token in cleaned_terms {

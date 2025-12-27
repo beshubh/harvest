@@ -392,6 +392,52 @@ impl PageRepo {
     pub async fn update(&self, id: ObjectId, update: Document) -> Result<bool> {
         self.repo.update_by_id(id, update).await
     }
+
+    /// List unindexed pages using cursor pagination
+    pub async fn list_unindexed_paginated(
+        &self,
+        limit: i64,
+        last_cursor: Option<ObjectId>,
+    ) -> Result<(Vec<Page>, Option<ObjectId>)> {
+        let limit = limit.max(1);
+        let filter = if let Some(cursor) = last_cursor {
+            doc! { "_id": {"$gt": cursor}, "$or": [{"indexed": false}, {"indexed": {"$exists": false}}]}
+        } else {
+            doc! { "$or": [{"indexed": false}, {"indexed": {"$exists": false}}]}
+        };
+        let limit = Some(limit);
+        let options = mongodb::options::FindOptions::builder()
+            .sort(doc! { "_id": 1})
+            .limit(limit)
+            .build();
+        let cursor = self
+            .repo
+            .collection
+            .find(filter)
+            .with_options(options)
+            .await
+            .context("failed to list unindexed pages with cursor pagination")?;
+
+        use futures::stream::TryStreamExt;
+        let pages: Vec<Page> = cursor
+            .try_collect()
+            .await
+            .context("failed to collect paginated unindexed pages")?;
+        let next_cursor = pages.last().map(|p| p.id);
+        Ok((pages, next_cursor))
+    }
+
+    /// Mark a page as indexed
+    pub async fn mark_as_indexed(&self, id: ObjectId) -> Result<bool> {
+        self.update(id, doc! { "indexed": true }).await
+    }
+
+    /// Mark multiple pages as indexed
+    pub async fn mark_many_as_indexed(&self, ids: &[ObjectId]) -> Result<u64> {
+        self.repo
+            .update_many(doc! { "_id": {"$in": ids}}, doc! { "indexed": true })
+            .await
+    }
 }
 
 // Test utilities

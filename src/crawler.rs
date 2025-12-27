@@ -9,7 +9,6 @@ use tokio::sync::Mutex;
 use tokio::sync::Semaphore;
 use tokio::sync::mpsc;
 
-use crate::analyzer::{PageProcessor, TextAnalyzer};
 use crate::data_models::Page;
 use crate::db::PageRepo;
 
@@ -54,7 +53,6 @@ pub struct Crawler {
     fetched_tx: mpsc::UnboundedSender<Page>,
     fetched_rx: Mutex<mpsc::UnboundedReceiver<Page>>,
     concurrency_semaphore: Arc<Semaphore>,
-    page_processor: Arc<PageProcessor>,
 }
 
 impl Crawler {
@@ -63,7 +61,6 @@ impl Crawler {
         pages_repo: PageRepo,
         max_concurrent_fetches: usize,
         frontier_size: usize,
-        max_concurrent_analysis: usize,
     ) -> Crawler {
         let (crawl_tx, crawl_rx) = mpsc::channel(frontier_size);
         let (fetched_tx, fetched_rx) = mpsc::unbounded_channel();
@@ -71,24 +68,6 @@ impl Crawler {
         let pages_repo = Arc::new(pages_repo);
 
         // Create text analyzer
-        let text_analyzer = TextAnalyzer::new(
-            vec![Box::new(crate::analyzer::HTMLTagFilter::default())],
-            Box::new(crate::analyzer::WhiteSpaceTokenizer),
-            vec![
-                Box::new(crate::analyzer::PunctuationStripFilter::default()),
-                Box::new(crate::analyzer::LowerCaseTokenFilter),
-                Box::new(crate::analyzer::NumericTokenFilter),
-                Box::new(crate::analyzer::StopWordTokenFilter),
-                Box::new(crate::analyzer::PorterStemmerTokenFilter),
-            ],
-        );
-
-        // Create page processor
-        let page_processor = Arc::new(PageProcessor::new(
-            text_analyzer,
-            max_concurrent_analysis,
-            pages_repo.clone(),
-        ));
 
         Crawler {
             visited_urls: DashSet::new(),
@@ -99,14 +78,12 @@ impl Crawler {
             fetched_tx: fetched_tx.clone(),
             fetched_rx: Mutex::new(fetched_rx),
             concurrency_semaphore: Arc::new(Semaphore::new(max_concurrent_fetches)),
-            page_processor,
         }
     }
 
     pub async fn crawl(self: Arc<Self>, starting_url: String) -> Result<()> {
         self.clone().spawn_crawler(starting_url, 0).await.unwrap();
         self.clone().spawn_mongo_inserter().await;
-        self.clone().page_processor.clone().spin()?;
         Ok(())
     }
 
@@ -217,10 +194,8 @@ impl Crawler {
             let mut rx = self_clone.fetched_rx.lock().await;
             while let Some(page) = rx.recv().await {
                 match self_clone.pages_repo.upsert(&page).await {
-                    Ok(_) => {
-                        if let Err(e) = self_clone.page_processor.process_tx.send(page) {
-                            log::error!("error sending page to processor, error: {:#}", e);
-                        }
+                    Ok(id ) => {
+                        log::info!("inserted to mongo: {}", id);
                     }
                     Err(e) => {
                         log::error!("error inserting to mongo, error: {:#}", e);

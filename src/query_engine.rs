@@ -26,7 +26,7 @@ impl QueryEngine {
         let filter = doc! { "term": {
             "$in": terms
         }};
-        let index_docs = i_index.find(filter).await?;
+        let _index_docs = i_index.find(filter).await?;
 
         unimplemented!()
     }
