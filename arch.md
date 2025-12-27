@@ -61,7 +61,7 @@ INDEX
 of a term overflows the threshold per mongodb document.
 - [ ] add skip pointers to the postings_list in `inverted_index`, skip pointers will square_root(|postings_list|) of the term.
   - remember that while calculating the length, we will have to take into account amount of buckets we have per term.
-- [ ] add positional index to the postings_list in `inverted_index`, positional index will be a list of positions of the term in the document.
+- [x] add positional index to the postings_list in `inverted_index`, positional index will be a list of positions of the term in the document.
 
 Questions (while thinking):
 - what if the minimum document frequency is in like 100s of millions?
@@ -95,7 +95,6 @@ query: "angels fear to tread"
 
 Algorithm
 ```rust
-
 fn positional_intersect(p1: &PostingList, p2: &PostingList, k: usize) -> Vec<PostingList> {
     let mut answer = Vec::new();
     while p1 != NIL && p2 != NIL {
@@ -123,7 +122,8 @@ fn positional_intersect(p1: &PostingList, p2: &PostingList, k: usize) -> Vec<Pos
             }
             p1 = p1.next();
             p2 = p2.next();
-        } else {
+        } 
+        else {
             if p1.doc_id < p2.doc_id {
                 p1 = p1.next();
             } else {
