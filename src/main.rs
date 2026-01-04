@@ -48,6 +48,16 @@ enum Commands {
         #[arg(short, long, default_value_t = 100_000_000)]
         budget_bytes: usize,
     },
+    /// Start the web server to serve the search API and UI
+    Serve {
+        /// Port to bind the server to
+        #[arg(short, long, default_value_t = 3000)]
+        port: u16,
+
+        /// Host to bind the server to
+        #[arg(short = 'H', long, default_value = "127.0.0.1")]
+        host: String,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -92,6 +102,9 @@ async fn async_main() -> anyhow::Result<()> {
         } => {
             run_index(page_fetch_limit, budget_bytes).await?;
         }
+        Commands::Serve { port, host } => {
+            run_serve(port, host).await?;
+        }
     }
 
     Ok(())
@@ -106,12 +119,7 @@ async fn run_crawl(
 ) -> anyhow::Result<()> {
     let pages_repo = PageRepo::new(&Database::get());
 
-    let crawler = Crawler::new(
-        max_depth,
-        pages_repo,
-        max_concurrent_fetches,
-        frontier_size,
-    );
+    let crawler = Crawler::new(max_depth, pages_repo, max_concurrent_fetches, frontier_size);
     let crawler = Arc::new(crawler);
 
     log::info!(
@@ -149,5 +157,47 @@ async fn run_index(page_fetch_limit: i64, budget_bytes: usize) -> anyhow::Result
     let indexer = Arc::new(Indexer::new(pages_repo, page_fetch_limit, db));
     indexer.run(budget_bytes).await?;
     log::info!("Indexing completed");
+    Ok(())
+}
+
+async fn run_serve(port: u16, host: String) -> anyhow::Result<()> {
+    use harvest::analyzer::TextAnalyzer;
+    use harvest::api::create_router;
+    use harvest::query_engine::QueryEngine;
+
+    let db = Database::get().clone();
+
+    log::info!("Initializing search engine...");
+
+    // Initialize TextAnalyzer with same pipeline as indexer
+    let analyzer = TextAnalyzer::new(
+        vec![Box::new(harvest::analyzer::HTMLTagFilter::default())],
+        Box::new(harvest::analyzer::WhiteSpaceTokenizer),
+        vec![
+            Box::new(harvest::analyzer::PunctuationStripFilter::default()),
+            Box::new(harvest::analyzer::LowerCaseTokenFilter),
+            Box::new(harvest::analyzer::NumericTokenFilter),
+            Box::new(harvest::analyzer::StopWordTokenFilter),
+            Box::new(harvest::analyzer::PorterStemmerTokenFilter),
+        ],
+    );
+
+    // Initialize QueryEngine
+    let query_engine = Arc::new(QueryEngine::new(db, analyzer));
+
+    // Create router with all routes
+    let app = create_router(query_engine);
+
+    // Bind to address
+    let addr = format!("{}:{}", host, port);
+    let listener = tokio::net::TcpListener::bind(&addr).await?;
+
+    log::info!("🚀 Server running at http://{}", addr);
+    log::info!("📂 Serving static files from ./static");
+    log::info!("🔍 API endpoint: POST http://{}/api/search", addr);
+
+    // Start server
+    axum::serve(listener, app).await?;
+
     Ok(())
 }

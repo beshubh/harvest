@@ -30,3 +30,7 @@ html5ever = "0.36.1"
 markup5ever_rcdom = "0.36.0"
 nanoid = "0.4.0"
 thiserror = "2.0.17"
+axum = "0.7"
+tower = "0.4"
+tower-http = { version = "0.5", features = ["fs", "cors"] }
+tokio-util = "0.7"

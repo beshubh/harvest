@@ -65,7 +65,6 @@ of a term overflows the threshold per mongodb document.
 
 Questions (while thinking):
 - what if the minimum document frequency is in like 100s of millions?
-- 
 version 1:
 - a naive version would be query the `index` collection with `$in` operator on the terms.
 - intersect the resulting posting_lists, starting from the term with lowest document frequecy.
@@ -87,11 +86,11 @@ to: 2: 〈47,86,234,999〉; 4: 〈14,24,774,944〉; 7: 〈199,319,599,709〉;
 tread: 2: 〈57,94,333〉; 4: 〈15,35,155〉; 7: 〈20,320〉;
 where: 2: 〈67,124,393,1001〉; 4: 〈11,41,101,421,431〉; 7: 〈16,36,736〉;
 
+version 4:
 query: "angels fear to tread"
 - we build a `inverted_index` with position_indices per term.
 - we can use the same skip pointers as in version 2.
 - we can use position offset value across different terms to find out the documents that contains exact phrase as in the query.
-
 
 Algorithm
 ```rust
@@ -133,3 +132,10 @@ fn positional_intersect(p1: &PostingList, p2: &PostingList, k: usize) -> Vec<Pos
     }
 }
 ```
+
+# TODOS
+ - [ ] add a rest api to view the search result documents (results from query engine).
+ - [ ] add UI on top of that rest api.
+ - [ ] solve for phrase queries using positional intersection.
+
+ 
