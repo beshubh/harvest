@@ -85,6 +85,10 @@ impl QueryEngine {
         &self.db
     }
 
+    pub fn analyzer(&self) -> &TextAnalyzer {
+        &self.analyzer
+    }
+
     fn intersect_postings<T>(posting_lists: &[&[T]]) -> Vec<T>
     where
         T: Ord + Clone,

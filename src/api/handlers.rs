@@ -21,6 +21,15 @@ pub async fn search_handler(
         return Err((StatusCode::BAD_REQUEST, "Query cannot be empty".to_string()));
     }
 
+    // Extract original query terms for highlighting (not stemmed)
+    // Split by whitespace and filter out empty strings
+    let highlighted_terms: Vec<String> = request
+        .query
+        .split_whitespace()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+
     // Execute search query
     let document_ids = query_engine.query(&request.query).await.map_err(|e| {
         (
@@ -60,11 +69,17 @@ pub async fn search_handler(
     let results: Vec<PageResult> = pages
         .into_iter()
         .map(|page| {
-            // Create a snippet from cleaned content (first 200 chars)
-            let snippet = if page.cleaned_content.len() > 200 {
-                format!("{}...", &page.cleaned_content[..200])
-            } else {
+            // Create a snippet from cleaned content, or fall back to html_body
+            let content = if !page.cleaned_content.is_empty() {
                 page.cleaned_content.clone()
+            } else {
+                page.html_body.clone()
+            };
+
+            let snippet = if content.len() > 200 {
+                format!("{}...", &content[..200])
+            } else {
+                content
             };
 
             PageResult {
@@ -85,5 +100,6 @@ pub async fn search_handler(
         results,
         total_results,
         processing_time_ms,
+        highlighted_terms,
     }))
 }

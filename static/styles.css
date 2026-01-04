@@ -288,6 +288,25 @@ main {
     margin-bottom: 0.75rem;
 }
 
+.result-snippet mark {
+    background: linear-gradient(135deg, rgba(139, 92, 246, 0.3), rgba(59, 130, 246, 0.3));
+    color: var(--text-primary);
+    font-weight: 600;
+    padding: 0.1rem 0.3rem;
+    border-radius: 4px;
+    border: 1px solid rgba(139, 92, 246, 0.5);
+    animation: highlightPulse 2s ease-in-out infinite;
+}
+
+@keyframes highlightPulse {
+    0%, 100% {
+        box-shadow: 0 0 5px rgba(139, 92, 246, 0.3);
+    }
+    50% {
+        box-shadow: 0 0 15px rgba(139, 92, 246, 0.6);
+    }
+}
+
 .result-meta {
     display: flex;
     gap: 1rem;

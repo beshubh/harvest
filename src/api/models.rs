@@ -11,6 +11,7 @@ pub struct SearchResponse {
     pub results: Vec<PageResult>,
     pub total_results: usize,
     pub processing_time_ms: u128,
+    pub highlighted_terms: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
