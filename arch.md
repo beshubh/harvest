@@ -134,8 +134,15 @@ fn positional_intersect(p1: &PostingList, p2: &PostingList, k: usize) -> Vec<Pos
 ```
 
 # TODOS
- - [ ] add a rest api to view the search result documents (results from query engine).
- - [ ] add UI on top of that rest api.
+ - [x] add a rest api to view the search result documents (results from query engine).
+ - [x] add UI on top of that rest api.
  - [ ] solve for phrase queries using positional intersection.
+ - [ ] solve for index updates.
+    - index should not get duplicated documents when crawler is ran and pages are indexed again.
+ - [ ] update readme, add comprehensive list of features, architecture and references used for building.
+ - [ ] add video showing, crawling, indexing and searching in action.
+
+
+
 
  
