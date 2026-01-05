@@ -1,10 +1,14 @@
 use anyhow::Result;
+use futures::stream::TryStreamExt;
+use mongodb::bson::doc;
 use mongodb::bson::oid::ObjectId;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use harvest::analyzer::TextAnalyzer;
-use harvest::data_models::InvertedIndexDoc;
-use harvest::db::Database;
+use harvest::data_models::{InvertedIndexDoc, Page};
+use harvest::db::{Database, PageRepo, collections};
+use harvest::indexer::Indexer;
 use harvest::query_engine::QueryEngine;
 
 mod test_helpers {
@@ -621,6 +625,228 @@ async fn test_query_terms_different_bucket_counts() -> Result<()> {
     assert_eq!(
         results, expected_intersection,
         "Results should be intersection after merging 'common' buckets"
+    );
+
+    cleanup_test_db(&db, &db_name).await?;
+    Ok(())
+}
+
+/// Test phrase queries using the full indexing pipeline with realistic document content.
+/// This validates that phrase-like queries work correctly when documents contain
+/// actual paragraph text rather than just individual terms.
+#[tokio::test]
+async fn test_query_phrase_with_full_indexing_pipeline() -> Result<()> {
+    let (db, db_name) = create_test_db().await?;
+    let pages_repo = Arc::new(PageRepo::new(&db));
+
+    // Create pages with realistic paragraph content containing phrases
+    let page_karpathy = Page::new(
+        "https://example.com/karpathy".to_string(),
+        "Andrej Karpathy Bio".to_string(),
+        r#"
+        Andrej Karpathy is a renowned AI researcher who has made significant contributions
+        to the field of deep learning. He previously worked at Tesla as the Director of
+        AI and Autopilot Vision, where he led the team building neural networks for
+        autonomous driving. Before Tesla, Karpathy was a research scientist at OpenAI,
+        working on generative models and reinforcement learning. He is well known for
+        his Stanford CS231n course on convolutional neural networks and computer vision.
+        His research interests include deep learning, computer vision, and natural
+        language processing. Karpathy has also been influential in making AI education
+        accessible through his YouTube videos and blog posts about neural network
+        architectures and training techniques.
+        "#
+        .to_string(),
+        vec![],
+        0,
+        false,
+    );
+
+    let page_musk = Page::new(
+        "https://example.com/musk".to_string(),
+        "Elon Musk Profile".to_string(),
+        r#"
+        Elon Musk is a genius entrepreneur and business magnate known for founding and
+        leading several revolutionary companies. He is the CEO of Tesla, the electric
+        vehicle company that has transformed the automotive industry. Musk also founded
+        SpaceX with the goal of making humanity a multi-planetary species. His vision
+        extends to neural interfaces through Neuralink and underground transportation
+        via The Boring Company. Many consider Musk a genius person who thinks decades
+        ahead of current technology. His approach to problem-solving combines engineering
+        excellence with ambitious long-term thinking. The companies he leads have
+        disrupted multiple industries from automotive to aerospace to energy storage.
+        "#
+        .to_string(),
+        vec![],
+        0,
+        false,
+    );
+
+    let page_science = Page::new(
+        "https://example.com/science/sky".to_string(),
+        "Why is the Sky Blue".to_string(),
+        r#"
+        The sky is blue due to a phenomenon called Rayleigh scattering. When sunlight
+        enters Earth's atmosphere, it collides with gas molecules and small particles.
+        Blue light has a shorter wavelength and is scattered more than other colors.
+        This scattered blue light reaches our eyes from all directions, making the
+        sky appear blue during the day. At sunset, the sky appears red or orange
+        because the light travels through more atmosphere, and most blue light is
+        scattered away before reaching us. The sky is dark at night because there
+        is no sunlight to scatter. On Mars, the sky appears to be reddish due to
+        iron oxide dust particles in the Martian atmosphere. Understanding why the
+        sky is blue was one of the early triumphs of physics in explaining everyday
+        phenomena using wave theory of light.
+        "#
+        .to_string(),
+        vec![],
+        0,
+        false,
+    );
+
+    // Insert pages into the database
+    pages_repo.insert(&page_karpathy).await?;
+    pages_repo.insert(&page_musk).await?;
+    pages_repo.insert(&page_science).await?;
+
+    // Run the full indexer pipeline
+    let indexer = Arc::new(Indexer::new(Arc::clone(&pages_repo), 100, db.clone()));
+    indexer.run(1024 * 1024).await?;
+
+    // Create query engine and test phrase queries
+    let analyzer = create_text_analyzer();
+    let query_engine = QueryEngine::new(db.clone(), analyzer);
+
+    // Test 1: Query "ai researcher" - should match Karpathy page
+    let results_ai = query_engine.query("ai researcher").await.unwrap();
+    // Fetch full page documents for the matching IDs
+    let pages_collection = query_engine.db().collection::<Page>(collections::PAGES);
+    let index_collection = query_engine
+        .db()
+        .collection::<InvertedIndexDoc>(collections::INDEX);
+
+    let filter = doc! {
+        "_id": {
+            "$in": results_ai.clone()
+        }
+    };
+
+    let results_ai: Vec<Page> = pages_collection
+        .find(filter)
+        .await
+        .unwrap()
+        .try_collect()
+        .await?;
+
+    assert!(
+        !results_ai.is_empty(),
+        "Query 'ai researcher' should return results for Karpathy page"
+    );
+    assert_eq!(results_ai[0].url, "https://example.com/karpathy");
+
+    // Test 2: Query "genius person" - should match Musk page
+    let results_genius = query_engine.query("genius person").await?;
+    let filter = doc! {
+        "_id": {
+            "$in": results_genius.clone()
+        }
+    };
+    assert!(
+        !results_genius.is_empty(),
+        "Query 'genius person' should return results for Musk page"
+    );
+
+    let results_genius: Vec<Page> = pages_collection
+        .find(filter)
+        .await
+        .unwrap()
+        .try_collect()
+        .await?;
+
+    assert_eq!(results_genius[0].url, "https://example.com/musk");
+
+    // Test 3: Query "Rayleigh scattering" - should match science page
+    let results_sky = query_engine.query("phenomenon called Rayleigh scattering").await?;
+
+    let filter = doc! {
+        "_id": {
+            "$in": results_sky.clone()
+        }
+    };
+
+    let results_sky: Vec<Page> = pages_collection
+        .find(filter)
+        .await
+        .unwrap()
+        .try_collect()
+        .await?;
+
+    let all_inverted_index_docs: Vec<InvertedIndexDoc> = index_collection.find(doc! {}).await.unwrap().try_collect().await.unwrap();
+    println!("all terms below");
+    for d in &all_inverted_index_docs {
+        print!("{:?} ", d.term);
+    }
+    println!("");
+    println!("--------------");
+
+    assert!(
+        !results_sky.is_empty(),
+        "Query 'phenomenon called Rayleigh scattering' should return results for science atmosphere' should return results for science page"
+    );
+
+    assert_eq!(results_sky[0].url, "https://example.com/science/sky");
+
+    // Test 4: Query "deep learning neural networks" - should match Karpathy page
+    let results_dl = query_engine.query("deep learning neural networks").await?;
+    let filter = doc! {
+        "_id": {
+            "$in": results_dl.clone()
+        }
+    };
+
+    let results_dl: Vec<Page> = pages_collection
+        .find(filter)
+        .await
+        .unwrap()
+        .try_collect()
+        .await?;
+
+    assert!(
+        !results_dl.is_empty(),
+        "Query 'deep learning neural networks' should return results for Karpathy page"
+    );
+
+    assert_eq!(results_dl[0].url, "https://example.com/karpathy");
+
+    // Test 5: Query "electric vehicle company" - should match Musk page
+    let results_ev = query_engine.query("electric vehicle company").await?;
+    let filter = doc! {
+        "_id": {
+            "$in": results_ev.clone()
+        }
+    };
+
+    let results_ev: Vec<Page> = pages_collection
+        .find(filter)
+        .await
+        .unwrap()
+        .try_collect()
+        .await?;
+
+    assert!(
+        !results_ev.is_empty(),
+        "Query 'electric vehicle company' should return results for Musk page"
+    );
+
+    assert_eq!(results_ev[0].url, "https://example.com/musk");
+
+    // Test 6: Query terms that don't exist together - should return empty
+    let results_nonexistent = query_engine
+        .query("quantum blockchain cryptocurrency")
+        .await?;
+
+    assert!(
+        results_nonexistent.is_empty(),
+        "Query for non-existent phrase should return no results"
     );
 
     cleanup_test_db(&db, &db_name).await?;
