@@ -71,7 +71,8 @@ where
             while pp1 < positions_p1.len() {
                 let mut pp2 = 0;
                 while pp2 < positions_p2.len() {
-                    if positions_p1[pp1].abs_diff(positions_p2[pp2]) <= k {
+                    let diff = positions_p1[pp1].abs_diff(positions_p2[pp2]);
+                    if diff <= k && positions_p1[pp1] != positions_p2[pp2] {
                         l.push(positions_p2[pp2]);
                     } else if positions_p2[pp2] > positions_p1[pp1] {
                         // nothing in positions_p2 can ever be smallers than k distance
@@ -124,32 +125,28 @@ impl QueryEngine {
 
     fn intersect_postings(
         terms: &[String],
-        term_postings_and_positions: &HashMap<
-            String,
-            (Vec<ObjectId>, HashMap<ObjectId, Vec<usize>>),
-        >,
+        tpp: &HashMap<String, (Vec<ObjectId>, HashMap<ObjectId, Vec<usize>>)>,
     ) -> Vec<ObjectId> {
-        if term_postings_and_positions.is_empty() {
+        if tpp.is_empty() {
             return Vec::new();
         }
         let pivot = (0..terms.len())
-            .min_by_key(|&i| term_postings_and_positions[&terms[i]].0.len())
+            .min_by_key(|&i| tpp[&terms[i]].0.len())
             .unwrap();
 
-        let mut result = term_postings_and_positions[&terms[pivot]].0.to_vec();
-        let mut result_positions = term_postings_and_positions[&terms[pivot]].1.clone();
+        let mut result = tpp[&terms[pivot]].0.to_vec();
+        let mut result_positions = tpp[&terms[pivot]].1.clone();
 
         for (term_idx, term) in terms.iter().enumerate() {
             if term_idx == pivot {
                 continue;
             }
+            // BUG: term chaining is wrong. it assumes simple left to right chaining
             let k = term_idx.abs_diff(pivot);
-            let (pl, pos) = term_postings_and_positions.get(term).unwrap();
+            let (pl, pos) = tpp.get(term).unwrap();
 
-            // Get positional matches between current result and this posting list
             let matches = positional_intersect(&result, &result_positions, &pl.to_vec(), &pos, k);
 
-            // Early exit if no matches
             if matches.is_empty() {
                 return Vec::new();
             }
@@ -161,7 +158,7 @@ impl QueryEngine {
                 new_positions
                     .entry(m.doc_id.clone())
                     .or_insert_with(Vec::new)
-                    .push(m.position2);
+                    .push(m.position1);
             }
 
             // Extract unique doc_ids (in sorted order to maintain consistency)
@@ -183,7 +180,10 @@ impl QueryEngine {
             .iter()
             .map(|t| t.term.clone())
             .collect::<Vec<String>>();
-        println!("DEBUG, query: terms, query: {:?}, terms: {:?}", query, terms);
+        println!(
+            "DEBUG, query: terms, query: {:?}, terms: {:?}",
+            query, terms
+        );
         if terms.is_empty() {
             return Ok(Vec::new());
         }
@@ -228,8 +228,8 @@ impl QueryEngine {
                 }
             }
         }
-
-        if term_posting_and_positions.len() != terms.len() {
+        let unique_terms: std::collections::HashSet<_> = terms.iter().collect();
+        if term_posting_and_positions.len() != unique_terms.len() {
             return Ok(Vec::new());
         }
 

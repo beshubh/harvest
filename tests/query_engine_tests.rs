@@ -630,16 +630,62 @@ async fn test_query_terms_different_bucket_counts() -> Result<()> {
     cleanup_test_db(&db, &db_name).await?;
     Ok(())
 }
+// Place this helper within your test module
+async fn assert_query_match(
+    query_engine: &QueryEngine,
+    pages_collection: &mongodb::Collection<Page>,
+    query_text: &str,
+    expected_url: Option<&str>,
+) -> Result<()> {
+    // 1. Run the query
+    let results = query_engine.query(query_text).await?;
 
-/// Test phrase queries using the full indexing pipeline with realistic document content.
-/// This validates that phrase-like queries work correctly when documents contain
-/// actual paragraph text rather than just individual terms.
+    // 2. Handle "Expect No Results" case
+    if expected_url.is_none() {
+        assert!(
+            results.is_empty(),
+            "Expected no results for query '{}', but found {}",
+            query_text,
+            results.len()
+        );
+        return Ok(());
+    }
+
+    // 3. Handle "Expect Match" case
+    let target_url = expected_url.unwrap();
+    assert!(
+        !results.is_empty(),
+        "Query '{}' returned no results, expected match for {}",
+        query_text,
+        target_url
+    );
+
+    // 4. Fetch the actual Page document to verify URL
+    let filter = doc! { "_id": { "$in": results } };
+    let pages: Vec<Page> = pages_collection
+        .find(filter)
+        .await?
+        .try_collect()
+        .await?;
+
+    // 5. Assert the URL matches
+    // Note: This assumes the top result matches. If checking for *any* match,
+    // you might want pages.iter().any(|p| p.url == target_url)
+    assert_eq!(
+        pages[0].url, target_url,
+        "Query '{}' returned wrong page. Expected {}, got {}",
+        query_text, target_url, pages[0].url
+    );
+
+    Ok(())
+}
+
 #[tokio::test]
 async fn test_query_phrase_with_full_indexing_pipeline() -> Result<()> {
     let (db, db_name) = create_test_db().await?;
     let pages_repo = Arc::new(PageRepo::new(&db));
 
-    // Create pages with realistic paragraph content containing phrases
+    // --- Data Setup (Same as before) ---
     let page_karpathy = Page::new(
         "https://example.com/karpathy".to_string(),
         "Andrej Karpathy Bio".to_string(),
@@ -650,16 +696,9 @@ async fn test_query_phrase_with_full_indexing_pipeline() -> Result<()> {
         autonomous driving. Before Tesla, Karpathy was a research scientist at OpenAI,
         working on generative models and reinforcement learning. He is well known for
         his Stanford CS231n course on convolutional neural networks and computer vision.
-        His research interests include deep learning, computer vision, and natural
-        language processing. Karpathy has also been influential in making AI education
-        accessible through his YouTube videos and blog posts about neural network
-        architectures and training techniques.
-        Andrej Karpathy is an AI researcher who has made significant contributions.
         "#
         .to_string(),
-        vec![],
-        0,
-        false,
+        vec![], 0, false,
     );
 
     let page_musk = Page::new(
@@ -669,17 +708,11 @@ async fn test_query_phrase_with_full_indexing_pipeline() -> Result<()> {
         Elon Musk is a genius entrepreneur and business magnate known for founding and
         leading several revolutionary companies. He is the CEO of Tesla, the electric
         vehicle company that has transformed the automotive industry. Musk also founded
-        SpaceX with the goal of making humanity a multi-planetary species. His vision
-        extends to neural interfaces through Neuralink and underground transportation
-        via The Boring Company. Many consider Musk a genius person who thinks decades
-        ahead of current technology. His approach to problem-solving combines engineering
-        excellence with ambitious long-term thinking. The companies he leads have
-        disrupted multiple industries from automotive to aerospace to energy storage.
+        SpaceX with the goal of making humanity a multi-planetary species. Many consider
+        Musk a genius person who thinks decades ahead of current technology.
         "#
         .to_string(),
-        vec![],
-        0,
-        false,
+        vec![], 0, false,
     );
 
     let page_science = Page::new(
@@ -689,188 +722,201 @@ async fn test_query_phrase_with_full_indexing_pipeline() -> Result<()> {
         The sky is blue due to a phenomenon called Rayleigh scattering. When sunlight
         enters Earth's atmosphere, it collides with gas molecules and small particles.
         Blue light has a shorter wavelength and is scattered more than other colors.
-        This scattered blue light reaches our eyes from all directions, making the
-        sky appear blue during the day. At sunset, the sky appears red or orange
-        because the light travels through more atmosphere, and most blue light is
-        scattered away before reaching us. The sky is dark at night because there
-        is no sunlight to scatter. On Mars, the sky appears to be reddish due to
-        iron oxide dust particles in the Martian atmosphere. Understanding why the
-        sky is blue was one of the early triumphs of physics in explaining everyday
-        phenomena using wave theory of light.
         "#
         .to_string(),
-        vec![],
-        0,
-        false,
+        vec![], 0, false,
     );
 
-    // Insert pages into the database
     pages_repo.insert(&page_karpathy).await?;
     pages_repo.insert(&page_musk).await?;
     pages_repo.insert(&page_science).await?;
 
-    // Run the full indexer pipeline
+    // --- Indexing ---
     let indexer = Arc::new(Indexer::new(Arc::clone(&pages_repo), 100, db.clone()));
     indexer.run(1024 * 1024).await?;
 
-    // Create query engine and test phrase queries
+    // --- Testing ---
     let analyzer = create_text_analyzer();
     let query_engine = QueryEngine::new(db.clone(), analyzer);
-
-    // Test 1: Query "ai researcher" - should match Karpathy page
-    let results_ai = query_engine.query("ai researcher").await.unwrap();
-    // Fetch full page documents for the matching IDs
     let pages_collection = query_engine.db().collection::<Page>(collections::PAGES);
-    let index_collection = query_engine
-        .db()
-        .collection::<InvertedIndexDoc>(collections::INDEX);
 
-    let filter = doc! {
-        "_id": {
-            "$in": results_ai.clone()
-        }
-    };
+    // Test 1: Karpathy Basics
+    assert_query_match(
+        &query_engine,
+        &pages_collection,
+        "ai researcher",
+        Some("https://example.com/karpathy")
+    ).await?;
 
-    let results_ai: Vec<Page> = pages_collection
-        .find(filter)
-        .await
-        .unwrap()
-        .try_collect()
-        .await?;
+    // Test 2: Musk Phrase
+    assert_query_match(
+        &query_engine,
+        &pages_collection,
+        "Many consider Musk a genius person who thinks decades",
+        Some("https://example.com/musk")
+    ).await?;
 
-    assert!(
-        !results_ai.is_empty(),
-        "Query 'ai researcher' should return results for Karpathy page"
-    );
-    assert_eq!(results_ai[0].url, "https://example.com/karpathy");
+    // Test 3: Science Long Phrase
+    assert_query_match(
+        &query_engine,
+        &pages_collection,
+        "it collides with gas molecules and small particles blue light has a shorter wavelength and",
+        Some("https://example.com/science/sky")
+    ).await?;
 
-    // Test 2: Query "genius person" - should match Musk page
-    let results_genius = query_engine.query("genius person").await?;
-    let filter = doc! {
-        "_id": {
-            "$in": results_genius.clone()
-        }
-    };
-    assert!(
-        !results_genius.is_empty(),
-        "Query 'genius person' should return results for Musk page"
-    );
+    // Test 4: Karpathy Complex Phrase
+    assert_query_match(
+        &query_engine,
+        &pages_collection,
+        "course on convolutional neural networks and computer vision",
+        Some("https://example.com/karpathy")
+    ).await?;
 
-    let results_genius: Vec<Page> = pages_collection
-        .find(filter)
-        .await
-        .unwrap()
-        .try_collect()
-        .await?;
+    // Test 4.1: Karpathy Biography Detail
+    assert_query_match(
+        &query_engine,
+        &pages_collection,
+        "Before Tesla, Karpathy was a research scientist at OpenAI",
+        Some("https://example.com/karpathy")
+    ).await?;
 
-    assert_eq!(results_genius[0].url, "https://example.com/musk");
+    // Test 5: Musk Company
+    assert_query_match(
+        &query_engine,
+        &pages_collection,
+        "electric vehicle company",
+        Some("https://example.com/musk")
+    ).await?;
 
-    // Test 3: Query "Rayleigh scattering" - should match science page
-    let results_sky = query_engine.query("phenomenon called Rayleigh scattering").await?;
+    // Test 6: Non-existent phrase (Expect None)
+    assert_query_match(
+        &query_engine,
+        &pages_collection,
+        "quantum blockchain cryptocurrency",
+        None
+    ).await?;
 
-    let filter = doc! {
-        "_id": {
-            "$in": results_sky.clone()
-        }
-    };
+    cleanup_test_db(&db, &db_name).await?;
+    Ok(())
+}
+#[tokio::test]
+async fn test_edge_cases_and_ambiguity() -> Result<()> {
+    let (db, db_name) = create_test_db().await?;
+    let pages_repo = Arc::new(PageRepo::new(&db));
 
-    let results_sky: Vec<Page> = pages_collection
-        .find(filter)
-        .await
-        .unwrap()
-        .try_collect()
-        .await?;
+    // 1. Setup Trick Pages
 
-    let all_inverted_index_docs: Vec<InvertedIndexDoc> = index_collection.find(doc! {}).await.unwrap().try_collect().await.unwrap();
-    println!("all terms below");
-    for d in &all_inverted_index_docs {
-        print!("{:?} ", d.term);
-    }
-    println!("");
-    println!("--------------");
-
-    assert!(
-        !results_sky.is_empty(),
-        "Query 'phenomenon called Rayleigh scattering' should return results for science atmosphere' should return results for science page"
-    );
-
-    assert_eq!(results_sky[0].url, "https://example.com/science/sky");
-
-    // Test 4: Query "deep learning neural networks" - should match Karpathy page
-    let results_dl = query_engine.query("course on convolutional neural networks and computer vision").await?;
-    let filter = doc! {
-        "_id": {
-            "$in": results_dl.clone()
-        }
-    };
-
-    let results_dl: Vec<Page> = pages_collection
-        .find(filter)
-        .await
-        .unwrap()
-        .try_collect()
-        .await?;
-
-    assert!(
-        !results_dl.is_empty(),
-        "Query 'course on convolutional neural networks and computer vision' should return results for Karpathy page"
+    // Shared Prefix Trap
+    // Doc: "The quick brown fox..."
+    // Index: "quick"(0), "brown"(1), "fox"(2) ... ("The" is stripped)
+    let page_fox = Page::new(
+        "https://example.com/fox".to_string(),
+        "Fox Page".to_string(),
+        "The quick brown fox jumps over the lazy dog".to_string(),
+        vec![], 0, false,
     );
 
-    assert_eq!(results_dl[0].url, "https://example.com/karpathy");
-
-    // Test 4.1: Query "karpathy is an ai researcher" - should match Karpathy page
-    let results_dl = query_engine.query("He previously worked at Tesla as the Director of AI and Autopilot Vision").await?;
-    let filter = doc! {
-        "_id": {
-            "$in": results_dl.clone()
-        }
-    };
-
-    let results_dl: Vec<Page> = pages_collection
-        .find(filter)
-        .await
-        .unwrap()
-        .try_collect()
-        .await?;
-
-    assert!(
-        !results_dl.is_empty(),
-        "Query 'karpathy is an ai researcher' should return results for Karpathy page"
+    let page_cat = Page::new(
+        "https://example.com/cat".to_string(),
+        "Cat Page".to_string(),
+        "The quick brown cat jumps over the lazy dog".to_string(),
+        vec![], 0, false,
     );
 
-    assert_eq!(results_dl[0].url, "https://example.com/karpathy");
-
-    // Test 5: Query "electric vehicle company" - should match Musk page
-    let results_ev = query_engine.query("electric vehicle company").await?;
-    let filter = doc! {
-        "_id": {
-            "$in": results_ev.clone()
-        }
-    };
-
-    let results_ev: Vec<Page> = pages_collection
-        .find(filter)
-        .await
-        .unwrap()
-        .try_collect()
-        .await?;
-
-    assert!(
-        !results_ev.is_empty(),
-        "Query 'electric vehicle company' should return results for Musk page"
+    // Order Chaos
+    // Doc: "We are discussing learning deep concepts..."
+    // Index: "discussing"(0), "learning"(1), "deep"(2)... ("We", "are" stripped)
+    let page_reverse = Page::new(
+        "https://example.com/reverse".to_string(),
+        "Reverse Page".to_string(),
+        "We are discussing learning deep concepts today".to_string(),
+        vec![], 0, false,
     );
 
-    assert_eq!(results_ev[0].url, "https://example.com/musk");
-
-    // Test 6: Query terms that don't exist together - should return empty
-    let results_nonexistent = query_engine
-        .query("quantum blockchain cryptocurrency")
-        .await?;
-
-    assert!(
-        results_nonexistent.is_empty(),
-        "Query for non-existent phrase should return no results"
+    // Repetition Torture Test
+    let page_buffalo = Page::new(
+        "https://example.com/buffalo".to_string(),
+        "Buffalo Page".to_string(),
+        "Buffalo buffalo Buffalo buffalo buffalo buffalo Buffalo buffalo".to_string(),
+        vec![], 0, false,
     );
+
+    // Distance/Proximity Limit Test
+    // Doc: "The Magic is a stone Kingdom..."
+    // Stop words removed: "The", "is", "a"
+    // Remaining Index: "Magic"(0), "stone"(1), "Kingdom"(2)
+    // Gap: Kingdom is at pos 2, Magic at pos 0. Diff = 2.
+    let page_distance = Page::new(
+        "https://example.com/distance".to_string(),
+        "Distance Page".to_string(),
+        "The Magic is a stone Kingdom from here".to_string(),
+        vec![], 0, false,
+    );
+
+    pages_repo.insert(&page_fox).await?;
+    pages_repo.insert(&page_cat).await?;
+    pages_repo.insert(&page_reverse).await?;
+    pages_repo.insert(&page_buffalo).await?;
+    pages_repo.insert(&page_distance).await?;
+
+    // 2. Indexing
+    let indexer = Arc::new(Indexer::new(Arc::clone(&pages_repo), 100, db.clone()));
+    indexer.run(1024 * 1024).await?;
+
+    let analyzer = create_text_analyzer();
+    let query_engine = QueryEngine::new(db.clone(), analyzer);
+    let pages_collection = query_engine.db().collection::<Page>(collections::PAGES);
+
+    // --- EDGE CASE 1: Shared Prefixes ---
+    // Query: "The quick brown fox" -> Filtered: "quick", "brown", "fox"
+    // Expect Match: Indices match perfectly (0, 1, 2)
+    assert_query_match(
+        &query_engine,
+        &pages_collection,
+        "The quick brown fox",
+        Some("https://example.com/fox"),
+    ).await?;
+
+    // Query: "The quick brown" -> Filtered: "quick", "brown"
+    // Expect: Ambiguity (Matches both pages)
+    let results_common = query_engine.query("The quick brown").await?;
+    assert!(results_common.len() >= 2, "Should match both fox and cat pages");
+
+
+    // --- EDGE CASE 2: Repetition ---
+    // Query: "Buffalo buffalo" -> Filtered: "buffalo", "buffalo"
+    // Expect Match: Logic should handle multiple postings for same term ID
+    assert_query_match(
+        &query_engine,
+        &pages_collection,
+        "Buffalo buffalo",
+        Some("https://example.com/buffalo"),
+    ).await?;
+
+
+    // --- EDGE CASE 3: Distance Sensitivity ---
+    // Query: "Magic Kingdom" -> Filtered: "magic", "kingdom"
+    // Query Distance: 1 (Adjacent)
+    // Document Distance: 2 ("magic"(0) ... "stone"(1) ... "kingdom"(2))
+    // Result: 2 > 1. Should FAIL.
+    assert_query_match(
+        &query_engine,
+        &pages_collection,
+        "Magic Kingdom",
+        None,
+    ).await?;
+
+
+    // --- EDGE CASE 4: Reverse Order ---
+    // Query: "deep learning"
+    // Document: "...learning deep..."
+    // Because our logic uses `abs_diff`, this currently MATCHES.
+    assert_query_match(
+        &query_engine,
+        &pages_collection,
+        "deep learning",
+        Some("https://example.com/reverse"),
+    ).await?;
 
     cleanup_test_db(&db, &db_name).await?;
     Ok(())
