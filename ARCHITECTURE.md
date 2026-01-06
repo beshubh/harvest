@@ -1,5 +1,3 @@
-
-
 # Indexer
 
 ## SPIMI
@@ -137,10 +135,12 @@ fn positional_intersect(p1: &PostingList, p2: &PostingList, k: usize) -> Vec<Pos
  - [x] add a rest api to view the search result documents (results from query engine).
  - [x] add UI on top of that rest api.
  - [x] solve for phrase queries using positional intersection. - 4h.
+ - [ ] FIX: a shit loads of bugs that were there for phrase queries.
  - [ ] improve UI to highlight the matched text/phrase. - 2h
  - [ ] solve for index updates.
     - index should not get duplicated documents when crawler is ran and pages are indexed again. - 8h
- - [ ] update readme, add comprehensive list of features, architecture and references used for building.- 1h
+ - [ ] update readme, add comprehensive list of features.
+ - [ ] add ARCHITECTURE.md for adding details on algorithms and diagram for flows etc, and references used for building.- 1h
  - [ ] add video showing, crawling, indexing and searching in action. - 1h 
 
 
@@ -152,3 +152,40 @@ https://curlie.org/Science/
 https://github.com/sindresorhus/awesome
 https://stackoverflow.com/questions
 https://news.ycombinator.com/
+
+
+```markdown
+# TEMPLATE FOR ARCHITECTURE.md
+# Search Engine Architecture
+
+## 1. System Overview
+[Insert your Diagram here - High level flow from Crawler -> Raw Data -> Indexer -> Search]
+
+## 2. Component: The Web Crawler
+* **Goal:** Efficiently traverse the web and store documents.
+* **Key Challenge:** Handling politeness and avoiding infinite loops.
+* **Implementation:** * Used `Robots.txt` parsing for politeness.
+    * Implemented a frontier using [Data Structure] to manage URL priority.
+
+## 3. Component: The Indexer (The "Hard" Part)
+### Why SPIMI (Single-Pass In-Memory Indexing)?
+* **The Problem:** BSBI (Block Sort-Based Indexing) requires storing term-docID pairs which consumes massive disk space for intermediate steps.
+* **My Solution:** I chose SPIMI because it builds the inverted index in RAM and writes distinct blocks directly to disk. This reduces disk I/O and manages memory pressure better.
+* **Constraint Handling:** The system flushes to disk when RAM usage hits [X] MB.
+
+### Inverted Index Structure
+* **Term Storage:** [Explain how you store terms]
+* **Posting Lists:** Used `Vec<u32>` with delta-encoding (if applicable) to save space.
+
+## 4. Component: The Query Engine
+### Phrase Search & Positional Intersection
+* **The Algorithm:** Standard boolean retrieval isn't enough for phrases like "deep learning".
+* **Implementation:** Implemented `positional_intersect`.
+    * **Heuristic:** Always start intersecting from the term with the **lowest document frequency**. This drastically reduces the number of comparisons.
+    * **Logic:** For a query `A B`, we look for `pos(B) - pos(A) == 1`.
+* **Edge Case Solved:** Handling repetitive terms (e.g., "buffalo buffalo") required unique logic to prevent false positives where a term matches itself.
+
+## 5. Key Trade-offs & Lessons
+* **Stop Words:** Removing them saves space but makes exact phrase matching ("to be or not to be") impossible. I decided to [Keep/Remove] them because...
+* **Concurrency:** [Mention if you used Tokio/Async for crawling vs CPU-bound threads for indexing].
+```

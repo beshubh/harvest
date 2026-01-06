@@ -151,21 +151,18 @@ impl QueryEngine {
                 return Vec::new();
             }
 
-            // Build new result and positions from the matches
-            // Group matches by doc_id and collect position2 values
             let mut new_positions: HashMap<ObjectId, Vec<usize>> = HashMap::new();
             for m in &matches {
                 new_positions
                     .entry(m.doc_id.clone())
                     .or_insert_with(Vec::new)
-                    .push(m.position1);
+                    .push(m.position1); // perserving the pivot position
             }
 
             // Extract unique doc_ids (in sorted order to maintain consistency)
             result = new_positions.keys().cloned().collect();
             result.sort();
 
-            // Update result_positions for next iteration
             result_positions = new_positions;
         }
 
@@ -208,7 +205,6 @@ impl QueryEngine {
             print!("{:?}, ", d.term);
         }
         println!("");
-        println!("-----------------");
 
         let mut term_posting_and_positions: HashMap<
             String,

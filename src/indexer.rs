@@ -118,6 +118,7 @@ impl Indexer {
             "Starting indexer with {}GB memory budget",
             budget_bytes / 1_000_000_000
         );
+        // list the unindexed pages to prevent duplicated indexing on the same pages.
 
         let (mut pages, mut cursor) = self
             .pages_repo
@@ -127,11 +128,12 @@ impl Indexer {
         log::info!("Fetched initial batch of {} unindexed pages", pages.len());
 
         let self_clone = self.clone();
+        // convert all the pages to a stream of tokens (text terms like hello, world, planet, etc)
+        // all of those tokens are sent to a channel `token_stream` which then is processed in `spimi_invert`
         tokio::spawn(async move {
             log::info!("Starting page tokenization stream");
             let mut total_pages_processed = 0;
             while pages.len() != 0 {
-                // Do text analysis first, then take those pages and do the indexing
                 total_pages_processed += pages.len();
 
                 // Collect page IDs before moving pages into Arc
@@ -210,6 +212,9 @@ impl Indexer {
         Ok(())
     }
 
+
+    // SPIMI invert is an algorithm that is an optimization on top of block sort based index (BSBI)
+    // see ARCHITECTURE for details on both the algorithms.
     pub async fn spimi_invert(self: Arc<Self>, budget_bytes: usize) -> Result<()> {
         log::info!("Starting SPIMI inversion");
 
@@ -219,6 +224,8 @@ impl Indexer {
         let mut tokens_processed = 0;
         let mut blocks_written = 0;
 
+        // we receive the tokens already sorted by the term, so once a term is processed fully, we don't need to worry
+        // that after processing some other term after this we again receive the older term.
         while let Some(token) = token_stream.recv().await {
             let token = match token {
                 StreamMsg::Token(token) => token,
