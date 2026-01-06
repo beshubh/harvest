@@ -453,9 +453,13 @@ impl TextAnalyzer {
         tokens
             .iter()
             .enumerate()
-            .map(|(idx, tok)| TextToken {
-                term: tok.clone(),
-                pos: idx,
+            .map(|(idx, tok)| {
+                let r = TextToken {
+                    term: tok.clone(),
+                    pos: idx, // BUG: is this the correct position? if we preserve the original offset instead of having incremental positions
+                              // then we will need to preserve the distance b/w terms in the query as well and use that distance instead of k = 1, for phrase queries.
+                };
+                r
             })
             .collect()
     }
@@ -474,6 +478,9 @@ impl TextAnalyzer {
         let mut tokens = self.tokenize(content);
 
         tokens = self.token_filter(tokens);
+        for (idx, token) in tokens.iter_mut().enumerate() {
+            token.pos = idx;
+        }
         Ok(tokens)
     }
 }

@@ -122,30 +122,32 @@ impl QueryEngine {
         &self.analyzer
     }
 
-    fn intersect_postings<T>(posting_lists: &[(&[T], &HashMap<T, Vec<usize>>)]) -> Vec<T>
-    where
-        T: Ord + Clone + Hash,
-    {
-        if posting_lists.is_empty() {
+    fn intersect_postings(
+        terms: &[String],
+        term_postings_and_positions: &HashMap<
+            String,
+            (Vec<ObjectId>, HashMap<ObjectId, Vec<usize>>),
+        >,
+    ) -> Vec<ObjectId> {
+        if term_postings_and_positions.is_empty() {
             return Vec::new();
         }
-        let mut smallest_idx = 0usize;
-        for (idx, (pl, _)) in posting_lists.iter().enumerate() {
-            if pl.len() < posting_lists[smallest_idx].0.len() {
-                smallest_idx = idx;
-            }
-        }
-        let mut result = posting_lists[smallest_idx].0.to_vec();
-        let mut result_positions = posting_lists[smallest_idx].1.clone();
+        let pivot = (0..terms.len())
+            .min_by_key(|&i| term_postings_and_positions[&terms[i]].0.len())
+            .unwrap();
 
-        for (idx, (pl, positions)) in posting_lists.iter().enumerate() {
-            if idx == smallest_idx {
+        let mut result = term_postings_and_positions[&terms[pivot]].0.to_vec();
+        let mut result_positions = term_postings_and_positions[&terms[pivot]].1.clone();
+
+        for (term_idx, term) in terms.iter().enumerate() {
+            if term_idx == pivot {
                 continue;
             }
+            let k = term_idx.abs_diff(pivot);
+            let (pl, pos) = term_postings_and_positions.get(term).unwrap();
 
             // Get positional matches between current result and this posting list
-            let matches =
-                positional_intersect(&result, &result_positions, &pl.to_vec(), &positions, 1);
+            let matches = positional_intersect(&result, &result_positions, &pl.to_vec(), &pos, k);
 
             // Early exit if no matches
             if matches.is_empty() {
@@ -154,7 +156,7 @@ impl QueryEngine {
 
             // Build new result and positions from the matches
             // Group matches by doc_id and collect position2 values
-            let mut new_positions: HashMap<T, Vec<usize>> = HashMap::new();
+            let mut new_positions: HashMap<ObjectId, Vec<usize>> = HashMap::new();
             for m in &matches {
                 new_positions
                     .entry(m.doc_id.clone())
@@ -181,7 +183,7 @@ impl QueryEngine {
             .iter()
             .map(|t| t.term.clone())
             .collect::<Vec<String>>();
-        println!("DEBUG, query: terms, {:?}", terms);
+        println!("DEBUG, query: terms, query: {:?}, terms: {:?}", query, terms);
         if terms.is_empty() {
             return Ok(Vec::new());
         }
@@ -201,7 +203,7 @@ impl QueryEngine {
             .await?
             .try_collect()
             .await?;
-       println!("DEBUG, query result terms");
+        println!("DEBUG, query result terms");
         for d in &index_docs {
             print!("{:?}, ", d.term);
         }
@@ -232,11 +234,12 @@ impl QueryEngine {
         }
 
         let mut posting_lists: Vec<(&[ObjectId], &HashMap<ObjectId, Vec<usize>>)> = Vec::new();
-        for term in &terms { // process the terms in query order.
+        for term in &terms {
+            // process the terms in query order.
             let (pl, pos) = term_posting_and_positions.get(term).unwrap();
             posting_lists.push((pl.as_slice(), pos));
         }
-        let result = Self::intersect_postings(&posting_lists);
+        let result = Self::intersect_postings(&terms, &term_posting_and_positions);
         Ok(result)
     }
 }

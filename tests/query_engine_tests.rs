@@ -654,6 +654,7 @@ async fn test_query_phrase_with_full_indexing_pipeline() -> Result<()> {
         language processing. Karpathy has also been influential in making AI education
         accessible through his YouTube videos and blog posts about neural network
         architectures and training techniques.
+        Andrej Karpathy is an AI researcher who has made significant contributions.
         "#
         .to_string(),
         vec![],
@@ -796,7 +797,7 @@ async fn test_query_phrase_with_full_indexing_pipeline() -> Result<()> {
     assert_eq!(results_sky[0].url, "https://example.com/science/sky");
 
     // Test 4: Query "deep learning neural networks" - should match Karpathy page
-    let results_dl = query_engine.query("deep learning neural networks").await?;
+    let results_dl = query_engine.query("course on convolutional neural networks and computer vision").await?;
     let filter = doc! {
         "_id": {
             "$in": results_dl.clone()
@@ -812,7 +813,29 @@ async fn test_query_phrase_with_full_indexing_pipeline() -> Result<()> {
 
     assert!(
         !results_dl.is_empty(),
-        "Query 'deep learning neural networks' should return results for Karpathy page"
+        "Query 'course on convolutional neural networks and computer vision' should return results for Karpathy page"
+    );
+
+    assert_eq!(results_dl[0].url, "https://example.com/karpathy");
+
+    // Test 4.1: Query "karpathy is an ai researcher" - should match Karpathy page
+    let results_dl = query_engine.query("He previously worked at Tesla as the Director of AI and Autopilot Vision").await?;
+    let filter = doc! {
+        "_id": {
+            "$in": results_dl.clone()
+        }
+    };
+
+    let results_dl: Vec<Page> = pages_collection
+        .find(filter)
+        .await
+        .unwrap()
+        .try_collect()
+        .await?;
+
+    assert!(
+        !results_dl.is_empty(),
+        "Query 'karpathy is an ai researcher' should return results for Karpathy page"
     );
 
     assert_eq!(results_dl[0].url, "https://example.com/karpathy");
