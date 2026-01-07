@@ -440,6 +440,83 @@ impl PageRepo {
     }
 }
 
+// InvertedIndex-specific operations for incremental indexing
+
+use crate::data_models::InvertedIndexDoc;
+
+/// Extended operations specific to InvertedIndex collection
+pub struct InvertedIndexRepo {
+    collection: Collection<InvertedIndexDoc>,
+}
+
+impl InvertedIndexRepo {
+    pub fn new(db: &Database) -> Self {
+        Self {
+            collection: db.collection(collections::INDEX),
+        }
+    }
+
+    /// Get the last bucket for a term (highest bucket number).
+    /// Used for incremental indexing to continue from existing buckets.
+    pub async fn get_last_bucket(&self, term: &str) -> Result<Option<InvertedIndexDoc>> {
+        let options = mongodb::options::FindOneOptions::builder()
+            .sort(doc! { "bucket": -1 })
+            .build();
+
+        self.collection
+            .find_one(doc! { "term": term })
+            .with_options(options)
+            .await
+            .context("Failed to get last bucket for term")
+    }
+
+    /// Append postings and positions to an existing bucket document.
+    /// Used when the last bucket isn't full and we can add more docs to it.
+    pub async fn append_to_bucket(
+        &self,
+        doc_id: ObjectId,
+        new_postings: &[ObjectId],
+        new_positions: &std::collections::HashMap<ObjectId, Vec<usize>>,
+    ) -> Result<bool> {
+        // Build the $set for positions - each new doc_id gets its positions added
+        let mut positions_set = Document::new();
+        for (posting_id, positions) in new_positions {
+            let key = format!("positions.{}", posting_id.to_hex());
+            // Convert usize to i64 for BSON compatibility
+            let positions_i64: Vec<i64> = positions.iter().map(|&p| p as i64).collect();
+            positions_set.insert(key, positions_i64);
+        }
+
+        let update = doc! {
+            "$push": { "postings": { "$each": new_postings } },
+            "$set": positions_set,
+            "$inc": { "document_frequency": new_postings.len() as i64 }
+        };
+
+        let result = self
+            .collection
+            .update_one(doc! { "_id": doc_id }, update)
+            .await
+            .context("Failed to append to existing bucket")?;
+
+        Ok(result.modified_count > 0)
+    }
+
+    /// Insert a new bucket document
+    pub async fn insert(&self, doc: InvertedIndexDoc) -> Result<ObjectId> {
+        let result = self
+            .collection
+            .insert_one(doc)
+            .await
+            .context("Failed to insert inverted index document")?;
+
+        result
+            .inserted_id
+            .as_object_id()
+            .ok_or_else(|| anyhow::anyhow!("Failed to get inserted ObjectId"))
+    }
+}
+
 // Test utilities
 #[cfg(test)]
 pub mod test_utils {

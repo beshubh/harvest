@@ -261,20 +261,42 @@ async fn test_query_multiple_terms_all_match() -> Result<()> {
     // Intersection should be: 2, 4, 5
     let expected_intersection = vec![doc_ids[2], doc_ids[4], doc_ids[5]];
 
+    // Create positions for each doc - for matching docs, positions must be adjacent (within k=1)
+    // Shared docs are: 2, 4, 5 - these need adjacent positions
+    let elephant_positions: HashMap<ObjectId, Vec<usize>> = vec![
+        (doc_ids[0], vec![100]), // not shared, position doesn't matter
+        (doc_ids[2], vec![10]),  // shared - position 10
+        (doc_ids[4], vec![20]),  // shared - position 20
+        (doc_ids[5], vec![30]),  // shared - position 30
+        (doc_ids[7], vec![100]), // not shared, position doesn't matter
+    ]
+    .into_iter()
+    .collect();
+
+    let giraffe_positions: HashMap<ObjectId, Vec<usize>> = vec![
+        (doc_ids[2], vec![11]),  // shared - adjacent to elephant's 10
+        (doc_ids[4], vec![21]),  // shared - adjacent to elephant's 20
+        (doc_ids[5], vec![31]),  // shared - adjacent to elephant's 30
+        (doc_ids[8], vec![200]), // not shared
+        (doc_ids[9], vec![200]), // not shared
+    ]
+    .into_iter()
+    .collect();
+
     let index_docs = vec![
         InvertedIndexDoc::new(
             "eleph".to_string(),
             0,
             elephant_docs.len() as u64,
             elephant_docs.clone(),
-            HashMap::new(),
+            elephant_positions,
         ),
         InvertedIndexDoc::new(
             "giraff".to_string(),
             0,
             giraffe_docs.len() as u64,
             giraffe_docs.clone(),
-            HashMap::new(),
+            giraffe_positions,
         ),
     ];
     insert_inverted_index_docs(&db, index_docs).await?;
@@ -352,30 +374,36 @@ async fn test_query_with_text_analysis() -> Result<()> {
     // Insert index docs using stemmed/analyzed terms
     let doc_ids = generate_sorted_object_ids(10);
 
+    // Create positions - "run" and "jump" appear adjacent in docs 3 and 5
+    let run_docs = vec![doc_ids[1], doc_ids[3], doc_ids[5]];
+    let run_positions: HashMap<ObjectId, Vec<usize>> = vec![
+        (doc_ids[1], vec![5]),
+        (doc_ids[3], vec![10]),
+        (doc_ids[5], vec![15]),
+    ]
+    .into_iter()
+    .collect();
+
+    let jump_docs = vec![doc_ids[3], doc_ids[5]];
+    let jump_positions: HashMap<ObjectId, Vec<usize>> = vec![
+        (doc_ids[3], vec![11]), // adjacent to "run" at position 10
+        (doc_ids[5], vec![16]), // adjacent to "run" at position 15
+    ]
+    .into_iter()
+    .collect();
+
     let index_docs = vec![
         // "running" stems to "run"
-        InvertedIndexDoc::new(
-            "run".to_string(),
-            0,
-            3,
-            vec![doc_ids[1], doc_ids[3], doc_ids[5]],
-            HashMap::new(),
-        ),
-        // "quickly" stems to "quickli"
-        InvertedIndexDoc::new(
-            "quickli".to_string(),
-            0,
-            2,
-            vec![doc_ids[3], doc_ids[5]],
-            HashMap::new(),
-        ),
+        InvertedIndexDoc::new("run".to_string(), 0, 3, run_docs, run_positions),
+        // "jumping" stems to "jump"
+        InvertedIndexDoc::new("jump".to_string(), 0, 2, jump_docs, jump_positions),
     ];
     insert_inverted_index_docs(&db, index_docs).await?;
 
     // Query with variations that should be stemmed and analyzed
     // "Running" -> lowercase -> "running" -> stem -> "run"
-    // "QUICKLY!" -> lowercase -> "quickly!" -> strip punct -> "quickly" -> stem -> "quickli"
-    let results = query_engine.query("Running QUICKLY!").await?;
+    // "JUMPING!" -> lowercase -> "jumping!" -> strip punct -> "jumping" -> stem -> "jump"
+    let results = query_engine.query("Running JUMPING!").await?;
 
     assert_eq!(
         results.len(),
@@ -431,22 +459,28 @@ async fn test_query_with_stop_words_filtered() -> Result<()> {
     // Insert index docs (stop words like "the", "a", "is" are not indexed)
     let doc_ids = generate_sorted_object_ids(5);
 
+    // Create positions - "quick" and "fox" appear adjacent in docs 0 and 2
+    let quick_docs = vec![doc_ids[0], doc_ids[2], doc_ids[4]];
+    let quick_positions: HashMap<ObjectId, Vec<usize>> = vec![
+        (doc_ids[0], vec![5]),
+        (doc_ids[2], vec![10]),
+        (doc_ids[4], vec![15]),
+    ]
+    .into_iter()
+    .collect();
+
+    let fox_docs = vec![doc_ids[0], doc_ids[2]];
+    let fox_positions: HashMap<ObjectId, Vec<usize>> = vec![
+        (doc_ids[0], vec![6]),  // adjacent to "quick" at position 5
+        (doc_ids[2], vec![11]), // adjacent to "quick" at position 10
+    ]
+    .into_iter()
+    .collect();
+
     let index_docs = vec![
         // Only meaningful words are indexed
-        InvertedIndexDoc::new(
-            "quick".to_string(),
-            0,
-            3,
-            vec![doc_ids[0], doc_ids[2], doc_ids[4]],
-            HashMap::new(),
-        ),
-        InvertedIndexDoc::new(
-            "fox".to_string(),
-            0,
-            2,
-            vec![doc_ids[0], doc_ids[2]],
-            HashMap::new(),
-        ),
+        InvertedIndexDoc::new("quick".to_string(), 0, 3, quick_docs, quick_positions),
+        InvertedIndexDoc::new("fox".to_string(), 0, 2, fox_docs, fox_positions),
     ];
     insert_inverted_index_docs(&db, index_docs).await?;
 
@@ -516,27 +550,67 @@ async fn test_query_complex_intersection_three_terms() -> Result<()> {
     // Intersection of all three: 3, 5, 10, 15
     let expected_intersection = vec![doc_ids[3], doc_ids[5], doc_ids[10], doc_ids[15]];
 
+    // Create positions for each term - they need to be adjacent for positional intersection
+    // Docs in intersection: 3, 5, 10, 15
+    let alpha_positions: HashMap<ObjectId, Vec<usize>> = vec![
+        (doc_ids[0], vec![100]),
+        (doc_ids[2], vec![100]),
+        (doc_ids[3], vec![10]), // intersection doc
+        (doc_ids[5], vec![20]), // intersection doc
+        (doc_ids[7], vec![100]),
+        (doc_ids[10], vec![30]), // intersection doc
+        (doc_ids[12], vec![100]),
+        (doc_ids[15], vec![40]), // intersection doc
+    ]
+    .into_iter()
+    .collect();
+
+    let beta_positions: HashMap<ObjectId, Vec<usize>> = vec![
+        (doc_ids[2], vec![200]),
+        (doc_ids[3], vec![11]), // intersection doc, adjacent to alpha
+        (doc_ids[5], vec![21]), // intersection doc, adjacent to alpha
+        (doc_ids[8], vec![200]),
+        (doc_ids[10], vec![31]), // intersection doc, adjacent to alpha
+        (doc_ids[11], vec![200]),
+        (doc_ids[15], vec![41]), // intersection doc, adjacent to alpha
+        (doc_ids[17], vec![200]),
+    ]
+    .into_iter()
+    .collect();
+
+    let gamma_positions: HashMap<ObjectId, Vec<usize>> = vec![
+        (doc_ids[3], vec![12]), // intersection doc, adjacent to beta
+        (doc_ids[5], vec![22]), // intersection doc, adjacent to beta
+        (doc_ids[9], vec![300]),
+        (doc_ids[10], vec![32]), // intersection doc, adjacent to beta
+        (doc_ids[13], vec![300]),
+        (doc_ids[15], vec![42]), // intersection doc, adjacent to beta
+        (doc_ids[18], vec![300]),
+    ]
+    .into_iter()
+    .collect();
+
     let index_docs = vec![
         InvertedIndexDoc::new(
             "alpha".to_string(),
             0,
             alpha_docs.len() as u64,
             alpha_docs,
-            HashMap::new(),
+            alpha_positions,
         ),
         InvertedIndexDoc::new(
             "beta".to_string(),
             0,
             beta_docs.len() as u64,
             beta_docs,
-            HashMap::new(),
+            beta_positions,
         ),
         InvertedIndexDoc::new(
             "gamma".to_string(),
             0,
             gamma_docs.len() as u64,
             gamma_docs,
-            HashMap::new(),
+            gamma_positions,
         ),
     ];
     insert_inverted_index_docs(&db, index_docs).await?;
@@ -591,27 +665,62 @@ async fn test_query_terms_different_bucket_counts() -> Result<()> {
     // Expected intersection: docs that appear in both terms
     let expected_intersection = vec![doc_ids[2], doc_ids[10], doc_ids[20]];
 
+    // Create positions for "common" term in bucket 0
+    let common_bucket0_positions: HashMap<ObjectId, Vec<usize>> = vec![
+        (doc_ids[0], vec![5]),
+        (doc_ids[2], vec![10]), // intersection doc
+        (doc_ids[4], vec![15]),
+        (doc_ids[6], vec![20]),
+        (doc_ids[8], vec![25]),
+        (doc_ids[10], vec![30]), // intersection doc
+        (doc_ids[12], vec![35]),
+        (doc_ids[14], vec![40]),
+    ]
+    .into_iter()
+    .collect();
+
+    // Create positions for "common" term in bucket 1
+    let common_bucket1_positions: HashMap<ObjectId, Vec<usize>> = vec![
+        (doc_ids[16], vec![45]),
+        (doc_ids[18], vec![50]),
+        (doc_ids[20], vec![55]), // intersection doc
+        (doc_ids[22], vec![60]),
+        (doc_ids[24], vec![65]),
+        (doc_ids[26], vec![70]),
+    ]
+    .into_iter()
+    .collect();
+
+    // Create positions for "rare" term - adjacent to "common" positions for intersection docs
+    let rare_bucket0_positions: HashMap<ObjectId, Vec<usize>> = vec![
+        (doc_ids[2], vec![11]),  // adjacent to common at 10
+        (doc_ids[10], vec![31]), // adjacent to common at 30
+        (doc_ids[20], vec![56]), // adjacent to common at 55
+    ]
+    .into_iter()
+    .collect();
+
     let index_docs = vec![
         InvertedIndexDoc::new(
             "common".to_string(),
             0,
             common_bucket0.len() as u64,
             common_bucket0,
-            HashMap::new(),
+            common_bucket0_positions,
         ),
         InvertedIndexDoc::new(
             "common".to_string(),
             1,
             common_bucket1.len() as u64,
             common_bucket1,
-            HashMap::new(),
+            common_bucket1_positions,
         ),
         InvertedIndexDoc::new(
             "rare".to_string(),
             0,
             rare_bucket0.len() as u64,
             rare_bucket0,
-            HashMap::new(),
+            rare_bucket0_positions,
         ),
     ];
     insert_inverted_index_docs(&db, index_docs).await?;
@@ -662,11 +771,7 @@ async fn assert_query_match(
 
     // 4. Fetch the actual Page document to verify URL
     let filter = doc! { "_id": { "$in": results } };
-    let pages: Vec<Page> = pages_collection
-        .find(filter)
-        .await?
-        .try_collect()
-        .await?;
+    let pages: Vec<Page> = pages_collection.find(filter).await?.try_collect().await?;
 
     // 5. Assert the URL matches
     // Note: This assumes the top result matches. If checking for *any* match,
@@ -698,7 +803,9 @@ async fn test_query_phrase_with_full_indexing_pipeline() -> Result<()> {
         his Stanford CS231n course on convolutional neural networks and computer vision.
         "#
         .to_string(),
-        vec![], 0, false,
+        vec![],
+        0,
+        false,
     );
 
     let page_musk = Page::new(
@@ -712,7 +819,9 @@ async fn test_query_phrase_with_full_indexing_pipeline() -> Result<()> {
         Musk a genius person who thinks decades ahead of current technology.
         "#
         .to_string(),
-        vec![], 0, false,
+        vec![],
+        0,
+        false,
     );
 
     let page_science = Page::new(
@@ -724,7 +833,9 @@ async fn test_query_phrase_with_full_indexing_pipeline() -> Result<()> {
         Blue light has a shorter wavelength and is scattered more than other colors.
         "#
         .to_string(),
-        vec![], 0, false,
+        vec![],
+        0,
+        false,
     );
 
     pages_repo.insert(&page_karpathy).await?;
@@ -745,16 +856,18 @@ async fn test_query_phrase_with_full_indexing_pipeline() -> Result<()> {
         &query_engine,
         &pages_collection,
         "ai researcher",
-        Some("https://example.com/karpathy")
-    ).await?;
+        Some("https://example.com/karpathy"),
+    )
+    .await?;
 
     // Test 2: Musk Phrase
     assert_query_match(
         &query_engine,
         &pages_collection,
         "Many consider Musk a genius person who thinks decades",
-        Some("https://example.com/musk")
-    ).await?;
+        Some("https://example.com/musk"),
+    )
+    .await?;
 
     // Test 3: Science Long Phrase
     assert_query_match(
@@ -769,32 +882,36 @@ async fn test_query_phrase_with_full_indexing_pipeline() -> Result<()> {
         &query_engine,
         &pages_collection,
         "course on convolutional neural networks and computer vision",
-        Some("https://example.com/karpathy")
-    ).await?;
+        Some("https://example.com/karpathy"),
+    )
+    .await?;
 
     // Test 4.1: Karpathy Biography Detail
     assert_query_match(
         &query_engine,
         &pages_collection,
         "Before Tesla, Karpathy was a research scientist at OpenAI",
-        Some("https://example.com/karpathy")
-    ).await?;
+        Some("https://example.com/karpathy"),
+    )
+    .await?;
 
     // Test 5: Musk Company
     assert_query_match(
         &query_engine,
         &pages_collection,
         "electric vehicle company",
-        Some("https://example.com/musk")
-    ).await?;
+        Some("https://example.com/musk"),
+    )
+    .await?;
 
     // Test 6: Non-existent phrase (Expect None)
     assert_query_match(
         &query_engine,
         &pages_collection,
         "quantum blockchain cryptocurrency",
-        None
-    ).await?;
+        None,
+    )
+    .await?;
 
     cleanup_test_db(&db, &db_name).await?;
     Ok(())
@@ -813,14 +930,18 @@ async fn test_edge_cases_and_ambiguity() -> Result<()> {
         "https://example.com/fox".to_string(),
         "Fox Page".to_string(),
         "The quick brown fox jumps over the lazy dog".to_string(),
-        vec![], 0, false,
+        vec![],
+        0,
+        false,
     );
 
     let page_cat = Page::new(
         "https://example.com/cat".to_string(),
         "Cat Page".to_string(),
         "The quick brown cat jumps over the lazy dog".to_string(),
-        vec![], 0, false,
+        vec![],
+        0,
+        false,
     );
 
     // Order Chaos
@@ -830,7 +951,9 @@ async fn test_edge_cases_and_ambiguity() -> Result<()> {
         "https://example.com/reverse".to_string(),
         "Reverse Page".to_string(),
         "We are discussing learning deep concepts today".to_string(),
-        vec![], 0, false,
+        vec![],
+        0,
+        false,
     );
 
     // Repetition Torture Test
@@ -838,7 +961,9 @@ async fn test_edge_cases_and_ambiguity() -> Result<()> {
         "https://example.com/buffalo".to_string(),
         "Buffalo Page".to_string(),
         "Buffalo buffalo Buffalo buffalo buffalo buffalo Buffalo buffalo".to_string(),
-        vec![], 0, false,
+        vec![],
+        0,
+        false,
     );
 
     // Distance/Proximity Limit Test
@@ -850,7 +975,9 @@ async fn test_edge_cases_and_ambiguity() -> Result<()> {
         "https://example.com/distance".to_string(),
         "Distance Page".to_string(),
         "The Magic is a stone Kingdom from here".to_string(),
-        vec![], 0, false,
+        vec![],
+        0,
+        false,
     );
 
     pages_repo.insert(&page_fox).await?;
@@ -875,13 +1002,16 @@ async fn test_edge_cases_and_ambiguity() -> Result<()> {
         &pages_collection,
         "The quick brown fox",
         Some("https://example.com/fox"),
-    ).await?;
+    )
+    .await?;
 
     // Query: "The quick brown" -> Filtered: "quick", "brown"
     // Expect: Ambiguity (Matches both pages)
     let results_common = query_engine.query("The quick brown").await?;
-    assert!(results_common.len() >= 2, "Should match both fox and cat pages");
-
+    assert!(
+        results_common.len() >= 2,
+        "Should match both fox and cat pages"
+    );
 
     // --- EDGE CASE 2: Repetition ---
     // Query: "Buffalo buffalo" -> Filtered: "buffalo", "buffalo"
@@ -891,21 +1021,15 @@ async fn test_edge_cases_and_ambiguity() -> Result<()> {
         &pages_collection,
         "Buffalo buffalo",
         Some("https://example.com/buffalo"),
-    ).await?;
-
+    )
+    .await?;
 
     // --- EDGE CASE 3: Distance Sensitivity ---
     // Query: "Magic Kingdom" -> Filtered: "magic", "kingdom"
     // Query Distance: 1 (Adjacent)
     // Document Distance: 2 ("magic"(0) ... "stone"(1) ... "kingdom"(2))
     // Result: 2 > 1. Should FAIL.
-    assert_query_match(
-        &query_engine,
-        &pages_collection,
-        "Magic Kingdom",
-        None,
-    ).await?;
-
+    assert_query_match(&query_engine, &pages_collection, "Magic Kingdom", None).await?;
 
     // --- EDGE CASE 4: Reverse Order ---
     // Query: "deep learning"
@@ -916,7 +1040,8 @@ async fn test_edge_cases_and_ambiguity() -> Result<()> {
         &pages_collection,
         "deep learning",
         Some("https://example.com/reverse"),
-    ).await?;
+    )
+    .await?;
 
     cleanup_test_db(&db, &db_name).await?;
     Ok(())

@@ -33,10 +33,6 @@ enum Commands {
         /// Size of the URL frontier queue
         #[arg(short = 's', long, default_value_t = 500)]
         frontier_size: usize,
-
-        /// Maximum number of concurrent content analysis tasks
-        #[arg(short = 'a', long, default_value_t = 200)]
-        max_concurrent_analysis: usize,
     },
     /// Index the documents that were previously crawled
     Index {
@@ -85,14 +81,12 @@ async fn async_main() -> anyhow::Result<()> {
             max_depth,
             max_concurrent_fetches,
             frontier_size,
-            max_concurrent_analysis,
         } => {
             run_crawl(
                 url,
                 max_depth,
                 max_concurrent_fetches,
                 frontier_size,
-                max_concurrent_analysis,
             )
             .await?;
         }
@@ -115,7 +109,6 @@ async fn run_crawl(
     max_depth: usize,
     max_concurrent_fetches: usize,
     frontier_size: usize,
-    max_concurrent_analysis: usize,
 ) -> anyhow::Result<()> {
     let pages_repo = PageRepo::new(&Database::get());
 
@@ -123,12 +116,11 @@ async fn run_crawl(
     let crawler = Arc::new(crawler);
 
     log::info!(
-        "Starting crawl from {} with max_depth={}, max_concurrent_fetches={}, frontier_size={}, max_concurrent_analysis={}",
+        "Starting crawl from {} with max_depth={}, max_concurrent_fetches={}, frontier_size={}",
         url,
         max_depth,
         max_concurrent_fetches,
         frontier_size,
-        max_concurrent_analysis
     );
 
     match crawler.crawl(url).await {

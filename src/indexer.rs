@@ -19,6 +19,7 @@ use crate::data_models::InvertedIndexDoc;
 use crate::data_models::Page;
 use crate::data_models::SpimiDoc;
 use crate::db::Database;
+use crate::db::InvertedIndexRepo;
 use crate::db::PageRepo;
 
 /// Single Pass In Memory Indexing
@@ -69,6 +70,7 @@ pub struct SpimiBlock {
 pub struct Indexer {
     db: Database,
     pages_repo: Arc<PageRepo>,
+    inverted_index_repo: Arc<InvertedIndexRepo>,
     page_fetch_limit: i64,
     token_stream_tx: mpsc::UnboundedSender<StreamMsg>,
     token_stream_rx: Mutex<mpsc::UnboundedReceiver<StreamMsg>>,
@@ -106,6 +108,7 @@ impl Indexer {
         Self {
             page_fetch_limit,
             pages_repo,
+            inverted_index_repo: Arc::new(InvertedIndexRepo::new(&db)),
             token_stream_tx: tx,
             token_stream_rx: Mutex::new(rx),
             db,
@@ -211,7 +214,6 @@ impl Indexer {
         );
         Ok(())
     }
-
 
     // SPIMI invert is an algorithm that is an optimization on top of block sort based index (BSBI)
     // see ARCHITECTURE for details on both the algorithms.
@@ -448,27 +450,69 @@ impl Indexer {
         let mut current_positions = HashMap::new();
         let mut bucket = 0_i16;
         let mut active_term: Option<String> = Option::None;
+        // Track if we're appending to an existing bucket (for incremental indexing)
+        let mut existing_bucket_id: Option<ObjectId> = None;
 
         while let Some(Reverse(item)) = min_terms.pop() {
-            // let this_postings = item.doc.postings;
             let doc = item.doc;
 
-            // BUG: What happens when the term changes and we have not inserted what we had collected so far?
-            //
+            // When term changes, flush the current term and load state for new term
             if let Some(ref term) = active_term {
                 if *term != doc.term {
-                    // we are done with the old term across all blocks
+                    // Flush the old term
                     self.flush_term_to_db(
                         term,
                         &mut current_postings,
                         &mut current_positions,
                         &mut bucket,
                         &mut docs_written,
+                        &mut existing_bucket_id,
                     )
                     .await?;
                     current_positions.clear();
                     current_postings.clear();
-                    bucket = 0;
+
+                    // Load existing bucket state for the new term (incremental indexing)
+                    if let Some(last_bucket) =
+                        self.inverted_index_repo.get_last_bucket(&doc.term).await?
+                    {
+                        let space_used = last_bucket.postings.len();
+                        if space_used < DOCIDS_PER_MONGO_DOCUMENT {
+                            // We can continue appending to this bucket
+                            log::debug!(
+                                "Continuing from existing bucket {} for term '{}' ({}/{} docs)",
+                                last_bucket.bucket,
+                                doc.term,
+                                space_used,
+                                DOCIDS_PER_MONGO_DOCUMENT
+                            );
+                            bucket = last_bucket.bucket;
+                            existing_bucket_id = Some(last_bucket.id);
+                            // Note: We don't load existing postings/positions - we only append new ones
+                        } else {
+                            // Bucket is full, start a new one
+                            bucket = last_bucket.bucket + 1;
+                            existing_bucket_id = None;
+                        }
+                    } else {
+                        // No existing bucket, start fresh
+                        bucket = 0;
+                        existing_bucket_id = None;
+                    }
+                }
+            } else {
+                // First term - check if it exists in the index
+                if let Some(last_bucket) =
+                    self.inverted_index_repo.get_last_bucket(&doc.term).await?
+                {
+                    let space_used = last_bucket.postings.len();
+                    if space_used < DOCIDS_PER_MONGO_DOCUMENT {
+                        bucket = last_bucket.bucket;
+                        existing_bucket_id = Some(last_bucket.id);
+                    } else {
+                        bucket = last_bucket.bucket + 1;
+                        existing_bucket_id = None;
+                    }
                 }
             }
             active_term = Some(doc.term.clone());
@@ -492,6 +536,7 @@ impl Indexer {
                     &mut flush_positions,
                     &mut bucket,
                     &mut docs_written,
+                    &mut existing_bucket_id,
                 )
                 .await?;
                 current_postings = overflow_postings;
@@ -526,6 +571,7 @@ impl Indexer {
                     &mut current_positions,
                     &mut bucket,
                     &mut docs_written,
+                    &mut existing_bucket_id,
                 )
                 .await?;
             }
@@ -594,24 +640,33 @@ impl Indexer {
         positions: &mut HashMap<ObjectId, Vec<usize>>,
         bucket: &mut i16,
         docs_written: &mut usize,
+        existing_bucket_id: &mut Option<ObjectId>,
     ) -> Result<()> {
         if postings.is_empty() {
             return Ok(());
         }
 
-        let doc = InvertedIndexDoc::new(
-            term.to_string(),
-            *bucket,
-            postings.len() as u64,
-            postings.clone(),
-            positions.clone(),
-        );
-
-        self.db
-            .collection::<InvertedIndexDoc>("inverted_index")
-            .insert_one(doc)
-            .await
-            .unwrap();
+        // If we have an existing bucket to append to, use update instead of insert
+        if let Some(doc_id) = existing_bucket_id.take() {
+            log::debug!(
+                "Appending {} docs to existing bucket for term '{}'",
+                postings.len(),
+                term
+            );
+            self.inverted_index_repo
+                .append_to_bucket(doc_id, postings, positions)
+                .await?;
+        } else {
+            // Insert a new bucket document
+            let doc = InvertedIndexDoc::new(
+                term.to_string(),
+                *bucket,
+                postings.len() as u64,
+                postings.clone(),
+                positions.clone(),
+            );
+            self.inverted_index_repo.insert(doc).await?;
+        }
 
         *docs_written += 1;
         *bucket += 1;

@@ -189,3 +189,37 @@ https://news.ycombinator.com/
 * **Stop Words:** Removing them saves space but makes exact phrase matching ("to be or not to be") impossible. I decided to [Keep/Remove] them because...
 * **Concurrency:** [Mention if you used Tokio/Async for crawling vs CPU-bound threads for indexing].
 ```
+
+# updating the index
+
+*Current flow*
+
+1. Crawl pages
+2. store the pages to `pages` collection.
+3. Index the pages, mark `page` in mongodb as `indexed` so next index command does not indexes already indexed pages.
+
+_Problems that might arise when indexing on just newer pages_
+
+Problem: New pages might have `terms` that exist in already `indexed` pages as well, which means the index might have
+some buckets for that `term` which is not full (not 100k docs) and we create a new bucket while the older one still had space.
+
+Solution: 
+Solution for this should be simple enough, we can just get the `last` bucket for the `term` we are processing, and `bucket` is not full
+i.e. document frequency is less than 100k and we are good, we can start from there and keep adding the new docs with newer buckets after that.
+
+document sorting won't be an issue as newer docs will by definition be greater (in sort order) than the older docs.
+
+any other problem? on indexing just the newer pages, i don't think there will be any other problem.
+
+
+_Problems that might arise when re-indexing the already indexed pages_
+
+What are the changes?
+ - those pages might have new terms now.
+ - with this the term -> postings will obviously change.
+ - positions of a term in the documents will also change with this.
+
+ notes on solution
+  - should we try and update positions for the terms in these docs in-place?
+      like we go to each term, update the `positions` map with these new positions for the same `term` in this doc_id, that will just be a simple 
+    update opeartion in the hashmap and then we can update the the `inverted_index` doc in mongodb as well.

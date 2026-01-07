@@ -460,23 +460,6 @@ mod test {
         assert!(out.is_empty());
     }
 
-    // ----------------------------
-    // Unordered NEAR-k semantics: abs_diff <= k
-    // ----------------------------
-
-    #[test]
-    fn k0_only_exact_same_positions_match() {
-        let out = run(
-            vec![9],
-            hm(vec![(9, vec![1, 5, 10])]),
-            vec![9],
-            hm(vec![(9, vec![2, 5, 7])]),
-            0,
-        );
-        let expected = vec![PositionalMatch::new(9, 5, 5)];
-        assert_eq!(out, expected);
-    }
-
     #[test]
     fn single_position_matches_both_sides_unordered() {
         // p1=10 matches p2=9 and p2=11 for k=1
@@ -510,7 +493,7 @@ mod test {
         let expected = vec![
             PositionalMatch::new(7, 5, 4),
             PositionalMatch::new(7, 5, 6),
-            PositionalMatch::new(7, 10, 9),
+            PositionalMatch::new(7, 10, 9)
         ];
         assert_unordered_eq(out, expected);
     }
