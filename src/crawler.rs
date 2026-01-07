@@ -194,7 +194,7 @@ impl Crawler {
             let mut rx = self_clone.fetched_rx.lock().await;
             while let Some(page) = rx.recv().await {
                 match self_clone.pages_repo.upsert(&page).await {
-                    Ok(id ) => {
+                    Ok(id) => {
                         log::info!("inserted to mongo: {}", id);
                     }
                     Err(e) => {
