@@ -46,10 +46,14 @@ cp .env.example .env
 **1. Crawl websites**
 ```bash
 # Crawl Wikipedia starting from the search engine article, depth 2
+# Recommendation for max-depth is not make it too big like even with number say 10
+# it will take a lot of time as the crawler will go to deep in web.
+# BUT, you can always just stop the crawler.
 cargo run --release -- crawl \
   --url "https://en.wikipedia.org/wiki/Search_engine" \
   --max-depth 2 \
   --max-concurrent-fetches 100
+
 ```
 
 **2. Build the index**
@@ -106,6 +110,12 @@ cargo test
 cargo test --test query_engine_tests
 cargo test --test indexer_tests
 ```
+
+## TODOs
+ - [ ] IP rotation service integration so we don't get blacklisted by websites.
+ - [ ] Spell correction. (Did you mean x?)
+ - [ ] Re-Indexing of the same pages, crawled after some time of indexing. (Currently we only support incremental indexing)
+
 
 ## License
 
