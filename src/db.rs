@@ -17,8 +17,7 @@ static DB: OnceCell<Database> = OnceCell::new();
 pub mod collections {
     pub const PAGES: &str = "pages";
     pub const INDEX: &str = "inverted_index";
-    // Add more collection names here as your project grows
-    // pub const USERS: &str = "users";
+    pub const MERGE_CHECKPOINTS: &str = "merge_checkpoints";
 }
 
 /// Main database wrapper providing connection management and collection access
@@ -514,6 +513,116 @@ impl InvertedIndexRepo {
             .inserted_id
             .as_object_id()
             .ok_or_else(|| anyhow::anyhow!("Failed to get inserted ObjectId"))
+    }
+}
+
+// MergeCheckpoint-specific operations for crash recovery
+
+use crate::data_models::MergeCheckpoint;
+use mongodb::bson::DateTime;
+
+/// Repository for managing merge checkpoints to enable crash recovery
+pub struct MergeCheckpointRepo {
+    collection: Collection<MergeCheckpoint>,
+}
+
+impl MergeCheckpointRepo {
+    pub fn new(db: &Database) -> Self {
+        Self {
+            collection: db.collection(collections::MERGE_CHECKPOINTS),
+        }
+    }
+
+    /// Get or create a checkpoint for a SPIMI block collection
+    pub async fn get_or_create(&self, collection_name: &str) -> Result<MergeCheckpoint> {
+        let filter = doc! { "collection_name": collection_name };
+
+        if let Some(checkpoint) = self
+            .collection
+            .find_one(filter.clone())
+            .await
+            .context("Failed to find checkpoint")?
+        {
+            Ok(checkpoint)
+        } else {
+            let checkpoint = MergeCheckpoint::new(collection_name.to_string());
+            self.collection
+                .insert_one(&checkpoint)
+                .await
+                .context("Failed to insert new checkpoint")?;
+            Ok(checkpoint)
+        }
+    }
+
+    /// Update the checkpoint after successfully flushing a term
+    pub async fn update_progress(
+        &self,
+        collection_name: &str,
+        term: &str,
+        bucket: i16,
+    ) -> Result<()> {
+        let filter = doc! { "collection_name": collection_name };
+        let update = doc! {
+            "$set": {
+                "last_merged_term": term,
+                "last_merged_bucket": bucket as i32,
+                "updated_at": DateTime::now(),
+            }
+        };
+
+        self.collection
+            .update_one(filter, update)
+            .await
+            .context("Failed to update checkpoint progress")?;
+
+        Ok(())
+    }
+
+    /// Mark a block collection as fully merged
+    pub async fn mark_completed(&self, collection_name: &str) -> Result<()> {
+        let filter = doc! { "collection_name": collection_name };
+        let update = doc! {
+            "$set": {
+                "completed": true,
+                "updated_at": DateTime::now(),
+            }
+        };
+
+        self.collection
+            .update_one(filter, update)
+            .await
+            .context("Failed to mark checkpoint as completed")?;
+
+        Ok(())
+    }
+
+    /// Get all incomplete checkpoints (for resuming merge)
+    pub async fn get_incomplete(&self) -> Result<Vec<MergeCheckpoint>> {
+        use futures::TryStreamExt;
+
+        let filter = doc! { "completed": false };
+        let cursor = self
+            .collection
+            .find(filter)
+            .await
+            .context("Failed to find incomplete checkpoints")?;
+
+        cursor
+            .try_collect()
+            .await
+            .context("Failed to collect incomplete checkpoints")
+    }
+
+    /// Delete checkpoints for completed blocks
+    pub async fn delete_completed(&self) -> Result<u64> {
+        let filter = doc! { "completed": true };
+        let result = self
+            .collection
+            .delete_many(filter)
+            .await
+            .context("Failed to delete completed checkpoints")?;
+
+        Ok(result.deleted_count)
     }
 }
 

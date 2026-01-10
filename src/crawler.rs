@@ -117,7 +117,7 @@ impl Crawler {
                     html = Some(res.unwrap());
                     break;
                 }
-                tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
+                tokio::time::sleep(tokio::time::Duration::from_millis((retried * 2000) as u64)).await;
             }
             drop(permit);
 

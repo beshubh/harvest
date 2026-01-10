@@ -16,13 +16,10 @@ pub async fn search_handler(
 ) -> Result<Json<SearchResponse>, (StatusCode, String)> {
     let start = Instant::now();
 
-    // Validate query
     if request.query.trim().is_empty() {
         return Err((StatusCode::BAD_REQUEST, "Query cannot be empty".to_string()));
     }
 
-    // Extract original query terms for highlighting (not stemmed)
-    // Split by whitespace and filter out empty strings
     let highlighted_terms: Vec<String> = request
         .query
         .split_whitespace()
@@ -30,7 +27,6 @@ pub async fn search_handler(
         .filter(|s| !s.is_empty())
         .collect();
 
-    // Execute search query
     let document_ids = query_engine.query(&request.query).await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,

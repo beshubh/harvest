@@ -161,32 +161,19 @@ async fn run_serve(port: u16, host: String) -> anyhow::Result<()> {
 
     log::info!("Initializing search engine...");
 
-    // Initialize TextAnalyzer with same pipeline as indexer
-    let analyzer = TextAnalyzer::new(
-        vec![Box::new(harvest::analyzer::HTMLTagFilter::default())],
-        Box::new(harvest::analyzer::WhiteSpaceTokenizer),
-        vec![
-            Box::new(harvest::analyzer::PunctuationStripFilter::default()),
-            Box::new(harvest::analyzer::LowerCaseTokenFilter),
-            Box::new(harvest::analyzer::NumericTokenFilter),
-            Box::new(harvest::analyzer::StopWordTokenFilter),
-            Box::new(harvest::analyzer::PorterStemmerTokenFilter),
-        ],
-    );
+    let analyzer = TextAnalyzer::default();
 
-    // Initialize QueryEngine
     let query_engine = Arc::new(QueryEngine::new(db, analyzer));
 
-    // Create router with all routes
     let app = create_router(query_engine);
 
     // Bind to address
     let addr = format!("{}:{}", host, port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
 
-    log::info!("🚀 Server running at http://{}", addr);
-    log::info!("📂 Serving static files from ./static");
-    log::info!("🔍 API endpoint: POST http://{}/api/search", addr);
+    log::info!("Server running at http://{}", addr);
+    log::info!("Serving static files from ./static");
+    log::info!("API endpoint: POST http://{}/api/search", addr);
 
     // Start server
     axum::serve(listener, app).await?;

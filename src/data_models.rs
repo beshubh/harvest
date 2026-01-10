@@ -138,3 +138,34 @@ impl InvertedIndexDoc {
         }
     }
 }
+
+/// Checkpoint for tracking merge progress to enable resumption after crashes.
+/// Stores the last successfully merged term + bucket per SPIMI block collection.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct MergeCheckpoint {
+    #[serde(rename = "_id")]
+    pub id: ObjectId,
+    /// Name of the SPIMI block collection being merged
+    pub collection_name: String,
+    /// Last term that was successfully flushed to inverted_index
+    pub last_merged_term: Option<String>,
+    /// Bucket number for the last term (for multi-bucket terms)
+    pub last_merged_bucket: i16,
+    /// Timestamp of last update
+    pub updated_at: DateTime,
+    /// Whether this block has been fully merged
+    pub completed: bool,
+}
+
+impl MergeCheckpoint {
+    pub fn new(collection_name: String) -> Self {
+        Self {
+            id: ObjectId::new(),
+            collection_name,
+            last_merged_term: None,
+            last_merged_bucket: -1,
+            updated_at: DateTime::now(),
+            completed: false,
+        }
+    }
+}

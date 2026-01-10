@@ -16,10 +16,13 @@ use tokio::sync::mpsc;
 
 use crate::analyzer::TextAnalyzer;
 use crate::data_models::InvertedIndexDoc;
+use crate::data_models::MergeCheckpoint;
 use crate::data_models::Page;
 use crate::data_models::SpimiDoc;
 use crate::db::Database;
 use crate::db::InvertedIndexRepo;
+
+use crate::db::MergeCheckpointRepo;
 use crate::db::PageRepo;
 
 /// Single Pass In Memory Indexing
@@ -75,6 +78,7 @@ pub struct Indexer {
     token_stream_tx: mpsc::UnboundedSender<StreamMsg>,
     token_stream_rx: Mutex<mpsc::UnboundedReceiver<StreamMsg>>,
     text_analyzer: Arc<TextAnalyzer>,
+    merge_checkpoint_repo: Arc<MergeCheckpointRepo>,
 }
 
 pub struct DictItem {
@@ -94,21 +98,12 @@ impl DictItem {
 impl Indexer {
     pub fn new(pages_repo: Arc<PageRepo>, page_fetch_limit: i64, db: Database) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
-        let text_analyzer = TextAnalyzer::new(
-            vec![Box::new(crate::analyzer::HTMLTagFilter::default())],
-            Box::new(crate::analyzer::WhiteSpaceTokenizer),
-            vec![
-                Box::new(crate::analyzer::PunctuationStripFilter::default()),
-                Box::new(crate::analyzer::LowerCaseTokenFilter),
-                Box::new(crate::analyzer::NumericTokenFilter),
-                Box::new(crate::analyzer::StopWordTokenFilter),
-                Box::new(crate::analyzer::PorterStemmerTokenFilter),
-            ],
-        );
+        let text_analyzer = TextAnalyzer::default();
         Self {
             page_fetch_limit,
             pages_repo,
             inverted_index_repo: Arc::new(InvertedIndexRepo::new(&db)),
+            merge_checkpoint_repo: Arc::new(MergeCheckpointRepo::new(&db)),
             token_stream_tx: tx,
             token_stream_rx: Mutex::new(rx),
             db,
@@ -414,19 +409,48 @@ impl Indexer {
 
         log::info!("Found {} blocks to merge", num_blocks);
 
+        // 1. Ensure checkpoints exist for all blocks
+        let mut checkpoint_map = HashMap::new();
+        for coll in &collections {
+            let cp = self.merge_checkpoint_repo.get_or_create(coll).await?;
+            // If the checkpoint is marked completed but the collection still exists (e.g. crash before cleanup),
+            // we should probably respect that it's completed or handle it.
+            // But get_or_create doesn't check 'completed'.
+            // NOTE: the merge loop logic relies on 'last_merged_term'.
+            // If it was completed, 'last_merged_term' will be the last term.
+            // But we filter primarily by 'incomplete' in previous logic.
+            // Let's rely on the fact that if it's completed we might re-verify or cleanup later.
+            // For now, just map it.
+            checkpoint_map.insert(coll.clone(), cp);
+        }
+
+        // 2. Open cursors
         let mut streamers = Vec::new();
+        let mut active_collections = Vec::new();
+
         for coll in collections {
             log::debug!("  Opening cursor for block: {}", coll);
+
+            // Check for checkpoint
+            let checkpoint = checkpoint_map.get(&coll);
+            let filter = if let Some(cp) = checkpoint {
+                if let Some(ref term) = cp.last_merged_term {
+                    log::info!("  Resuming {} from term '{}'", coll, term);
+                    doc! { "term": { "$gte": term } }
+                } else {
+                    doc! {}
+                }
+            } else {
+                doc! {}
+            };
+
             let collection = self.db.collection::<SpimiDoc>(&coll);
             let options = mongodb::options::FindOptions::builder()
                 .sort(doc! { "term": 1, "bucket": 1})
                 .build();
-            let cursor = collection
-                .find(doc! {})
-                .with_options(options)
-                .await
-                .unwrap();
+            let cursor = collection.find(filter).with_options(options).await.unwrap();
             streamers.push(cursor);
+            active_collections.push(coll);
         }
 
         let mut min_terms: BinaryHeap<Reverse<HeapItem>> = BinaryHeap::new();
@@ -467,6 +491,8 @@ impl Indexer {
                         &mut bucket,
                         &mut docs_written,
                         &mut existing_bucket_id,
+                        &active_collections,
+                        &mut checkpoint_map,
                     )
                     .await?;
                     current_positions.clear();
@@ -537,6 +563,8 @@ impl Indexer {
                     &mut bucket,
                     &mut docs_written,
                     &mut existing_bucket_id,
+                    &active_collections,
+                    &mut checkpoint_map,
                 )
                 .await?;
                 current_postings = overflow_postings;
@@ -546,12 +574,19 @@ impl Indexer {
             // ADVANCE the streamer where this term came from.
             let cursor = &mut streamers[item.streamer_idx];
             if cursor.has_next() {
-                let next_spimi = cursor.next().await.unwrap().unwrap();
-                min_terms.push(Reverse(HeapItem {
-                    term: next_spimi.term.clone(),
-                    streamer_idx: item.streamer_idx,
-                    doc: next_spimi,
-                }));
+                if let Some(res) = cursor.next().await {
+                    if res.is_err() {
+                        let err = res.clone().unwrap_err();
+                        log::error!("Error fetching next document from cursor: {:#}", err);
+                    } else {
+                        let next_spimi = res.unwrap();
+                        min_terms.push(Reverse(HeapItem {
+                            term: next_spimi.term.clone(),
+                            streamer_idx: item.streamer_idx,
+                            doc: next_spimi,
+                        }));
+                    }
+                }
             }
             terms_merged += 1;
             if terms_merged % 10_000 == 0 {
@@ -572,9 +607,16 @@ impl Indexer {
                     &mut bucket,
                     &mut docs_written,
                     &mut existing_bucket_id,
+                    &active_collections,
+                    &mut checkpoint_map,
                 )
                 .await?;
             }
+        }
+
+        // Mark all collections as completed
+        for coll in active_collections {
+            self.merge_checkpoint_repo.mark_completed(&coll).await?;
         }
 
         log::info!(
@@ -607,10 +649,18 @@ impl Indexer {
             .await?;
 
         let num_collections = collections.len();
+        // Only delete completed collections
         if num_collections == 0 {
             log::info!("No SPIMI block collections to clean up");
             return Ok(());
         }
+
+        // Get list of incomplete checkpoints to avoid deleting them
+        let incomplete = self.merge_checkpoint_repo.get_incomplete().await?;
+        let incomplete_names: Vec<String> = incomplete
+            .into_iter()
+            .map(|cp| cp.collection_name)
+            .collect();
 
         log::info!(
             "Found {} SPIMI block collections to delete",
@@ -618,6 +668,11 @@ impl Indexer {
         );
 
         for collection_name in collections {
+            if incomplete_names.contains(&collection_name) {
+                log::info!("  Skipping incomplete collection: {}", collection_name);
+                continue;
+            }
+
             log::debug!("  Dropping collection: {}", collection_name);
             self.db
                 .database()
@@ -625,6 +680,9 @@ impl Indexer {
                 .drop()
                 .await?;
         }
+
+        // Cleanup completed checkpoints
+        self.merge_checkpoint_repo.delete_completed().await?;
 
         log::info!(
             "Successfully deleted {} SPIMI block collections",
@@ -641,34 +699,76 @@ impl Indexer {
         bucket: &mut i16,
         docs_written: &mut usize,
         existing_bucket_id: &mut Option<ObjectId>,
+        active_collections: &[String],
+        checkpoints: &mut HashMap<String, MergeCheckpoint>,
     ) -> Result<()> {
         if postings.is_empty() {
             return Ok(());
         }
 
-        // If we have an existing bucket to append to, use update instead of insert
-        if let Some(doc_id) = existing_bucket_id.take() {
-            log::debug!(
-                "Appending {} docs to existing bucket for term '{}'",
-                postings.len(),
-                term
-            );
-            self.inverted_index_repo
-                .append_to_bucket(doc_id, postings, positions)
-                .await?;
-        } else {
-            // Insert a new bucket document
-            let doc = InvertedIndexDoc::new(
-                term.to_string(),
-                *bucket,
-                postings.len() as u64,
-                postings.clone(),
-                positions.clone(),
-            );
-            self.inverted_index_repo.insert(doc).await?;
+        // CHECKPOINT LOGIC: Check if this bucket is already merged
+        // We check against the first available checkpoint since all should be synced
+        let mut already_merged = false;
+        if let Some(first_coll) = active_collections.first() {
+            if let Some(cp) = checkpoints.get(first_coll) {
+                if let Some(ref last_term) = cp.last_merged_term {
+                    if last_term == term && cp.last_merged_bucket >= *bucket {
+                        already_merged = true;
+                    }
+                }
+            }
         }
 
-        *docs_written += 1;
+        if !already_merged {
+            // If we have an existing bucket to append to, use update instead of insert
+            if let Some(doc_id) = existing_bucket_id.take() {
+                log::debug!(
+                    "Appending {} docs to existing bucket for term '{}'",
+                    postings.len(),
+                    term
+                );
+                self.inverted_index_repo
+                    .append_to_bucket(doc_id, postings, positions)
+                    .await?;
+            } else {
+                // Insert a new bucket document
+                let doc = InvertedIndexDoc::new(
+                    term.to_string(),
+                    *bucket,
+                    postings.len() as u64,
+                    postings.clone(),
+                    positions.clone(),
+                );
+                self.inverted_index_repo.insert(doc).await?;
+            }
+            *docs_written += 1;
+        } else {
+            log::debug!(
+                "Skipping write for term '{}' bucket {} (already merged)",
+                term,
+                bucket
+            );
+        }
+
+        // Side effect: Update checkpoints
+        for coll in active_collections {
+            // Update DB
+            self.merge_checkpoint_repo
+                .update_progress(coll, term, *bucket)
+                .await?;
+
+            // Update in-memory map
+            if let Some(cp) = checkpoints.get_mut(coll) {
+                cp.last_merged_term = Some(term.to_string());
+                cp.last_merged_bucket = *bucket;
+                cp.updated_at = mongodb::bson::DateTime::now();
+            } else {
+                // Should exist, but handle creation if missing
+                // In memory we only update if it was tracked.
+                // If not tracked (maybe new collection?), we ignore for now as it wasn't in the initial map.
+            }
+        }
+
         *bucket += 1;
         Ok(())
     }

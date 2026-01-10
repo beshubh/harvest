@@ -408,6 +408,22 @@ pub struct TextAnalyzer {
     token_filters: Vec<Box<dyn TokenFilter>>,
 }
 
+impl Default for TextAnalyzer {
+    fn default() -> Self {
+        Self::new(
+            vec![Box::new(HTMLTagFilter::default())],
+            Box::new(WhiteSpaceTokenizer),
+            vec![
+                Box::new(PunctuationStripFilter::default()),
+                Box::new(LowerCaseTokenFilter),
+                Box::new(NumericTokenFilter),
+                Box::new(StopWordTokenFilter),
+                Box::new(PorterStemmerTokenFilter),
+            ]
+        )
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TextToken {
     pub term: String,

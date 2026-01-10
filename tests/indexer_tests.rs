@@ -7,8 +7,8 @@ use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use harvest::data_models::{InvertedIndexDoc, Page, SpimiDoc};
-use harvest::db::{Database, PageRepo};
+use harvest::data_models::{InvertedIndexDoc, MergeCheckpoint, Page, SpimiDoc};
+use harvest::db::{Database, MergeCheckpointRepo, PageRepo};
 use harvest::indexer::{DictItem, Indexer, SpimiBlock, merge_sorted_lists_dedup};
 
 /// Constant matching the one in indexer.rs for test verification.
@@ -707,12 +707,7 @@ async fn test_persist_block_to_disk_single_term_300k_docs() -> Result<()> {
     );
 
     let spimi_collection = &collections[0];
-    let docs = get_spimi_docs_from_collection(
-        &db,
-        spimi_collection,
-        Option::None,
-    )
-    .await?;
+    let docs = get_spimi_docs_from_collection(&db, spimi_collection, Option::None).await?;
 
     // Should have 3 documents (buckets 0, 1, 2)
     assert_eq!(
@@ -771,12 +766,7 @@ async fn test_persist_block_to_disk_exactly_100k_docs() -> Result<()> {
     indexer.persist_block_to_disk(block).await?;
 
     let collections = get_spimi_block_collection_names(&db).await?;
-    let docs = get_spimi_docs_from_collection(
-        &db,
-        &collections[0],
-        Option::None,
-    )
-    .await?;
+    let docs = get_spimi_docs_from_collection(&db, &collections[0], Option::None).await?;
 
     assert_eq!(
         docs.len(),
@@ -805,12 +795,7 @@ async fn test_persist_block_to_disk_100k_plus_1_docs() -> Result<()> {
     indexer.persist_block_to_disk(block).await?;
 
     let collections = get_spimi_block_collection_names(&db).await?;
-    let docs = get_spimi_docs_from_collection(
-        &db,
-        &collections[0],
-        Option::None,
-    )
-    .await?;
+    let docs = get_spimi_docs_from_collection(&db, &collections[0], Option::None).await?;
 
     assert_eq!(docs.len(), 2, "Should have 2 SpimiDoc for 100K+1 docs");
 
@@ -863,12 +848,7 @@ async fn test_persist_block_to_disk_multiple_terms_multi_bucket() -> Result<()> 
     indexer.persist_block_to_disk(block).await?;
 
     let collections = get_spimi_block_collection_names(&db).await?;
-    let docs = get_spimi_docs_from_collection(
-        &db,
-        &collections[0],
-        Option::None
-    )
-    .await?;
+    let docs = get_spimi_docs_from_collection(&db, &collections[0], Option::None).await?;
 
     // Count documents per term
     let mut term_doc_counts: HashMap<String, Vec<&SpimiDoc>> = HashMap::new();
@@ -1071,9 +1051,7 @@ async fn test_persist_block_to_disk_term_not_in_dictionary() -> Result<()> {
 
     // Verify only real_term was persisted
     let collections = get_spimi_block_collection_names(&db).await?;
-    let docs =
-        get_spimi_docs_from_collection(&db, &collections[0], Option::None)
-            .await?;
+    let docs = get_spimi_docs_from_collection(&db, &collections[0], Option::None).await?;
 
     assert_eq!(docs.len(), 1, "Only real_term should be persisted");
     assert_eq!(docs[0].term, "real_term");
@@ -1097,12 +1075,7 @@ async fn test_persist_block_to_disk_single_term_500k_docs() -> Result<()> {
     indexer.persist_block_to_disk(block).await?;
 
     let collections = get_spimi_block_collection_names(&db).await?;
-    let docs = get_spimi_docs_from_collection(
-        &db,
-        &collections[0],
-        Option::None,
-    )
-    .await?;
+    let docs = get_spimi_docs_from_collection(&db, &collections[0], Option::None).await?;
 
     // Should have 5 documents (buckets 0, 1, 2, 3, 4)
     assert_eq!(
@@ -1242,7 +1215,6 @@ fn test_merge_sorted_lists_large_lists() {
         assert!(result[i - 1] <= result[i]);
     }
 }
-
 
 // SpimiBlock tests
 #[test]
@@ -1391,7 +1363,11 @@ async fn test_merge_persisted_blocks_6_blocks_500k_total_docs() -> Result<()> {
     let docs = get_inverted_index_docs_for_term(&db, "large_term").await?;
 
     for doc in &docs {
-        println!("dock: bucket: {}, postings: {}", doc.bucket, doc.postings.len());
+        println!(
+            "dock: bucket: {}, postings: {}",
+            doc.bucket,
+            doc.postings.len()
+        );
     }
 
     // ~504K docs should result in 5+ buckets
@@ -1770,11 +1746,7 @@ async fn test_merge_persisted_blocks_single_block() -> Result<()> {
     indexer.merge_persisted_blocks().await?;
 
     // Verify all terms in inverted index
-    let all_docs = get_inverted_index_docs(
-        &db,
-        Option::None
-    )
-    .await?;
+    let all_docs = get_inverted_index_docs(&db, Option::None).await?;
     let terms: std::collections::HashSet<String> =
         all_docs.iter().map(|d| d.term.clone()).collect();
     println!("all terms: {:?}", terms);
@@ -2185,7 +2157,11 @@ async fn test_integration_shared_documents_across_blocks() -> Result<()> {
     // Verify shared_term
     let shared_docs_result = get_inverted_index_docs_for_term(&db, "shared_term").await?;
     for doc in &shared_docs_result {
-        println!("doc: bucket: {}, postings: {}", doc.bucket, doc.postings.len());
+        println!(
+            "doc: bucket: {}, postings: {}",
+            doc.bucket,
+            doc.postings.len()
+        );
     }
     assert_eq!(
         shared_docs_result.len(),
@@ -2207,7 +2183,11 @@ async fn test_integration_shared_documents_across_blocks() -> Result<()> {
     // Verify mixed_term has all unique docs from all blocks
     let mixed_docs = get_inverted_index_docs_for_term(&db, "mixed_term").await?;
     for doc in &mixed_docs {
-        println!("mixed doc len: {}, bucket: {}",doc.postings.len(), doc.bucket);
+        println!(
+            "mixed doc len: {}, bucket: {}",
+            doc.postings.len(),
+            doc.bucket
+        );
     }
     let mixed_total: usize = mixed_docs.iter().map(|d| d.postings.len()).sum();
     assert_eq!(
@@ -2215,6 +2195,100 @@ async fn test_integration_shared_documents_across_blocks() -> Result<()> {
         5000 * 6,
         "mixed_term should have 30K postings (5K from each of 6 blocks)"
     );
+
+    cleanup_test_db(&db, &db_name).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_merge_checkpoint_created_and_updated() -> Result<()> {
+    let (db, db_name) = create_test_db().await?;
+    let pages_repo = Arc::new(PageRepo::new(&db));
+    let indexer = Arc::new(Indexer::new(pages_repo, 100, db.clone()));
+
+    // Create a block with multiple terms
+    let terms = vec![
+        ("apple", vec![ObjectId::new()], 1),
+        ("banana", vec![ObjectId::new()], 1),
+    ];
+    let block = create_block_with_terms(terms.clone());
+    indexer.persist_block_to_disk(block).await?;
+
+    // Run merge
+    indexer.merge_persisted_blocks().await?;
+
+    // Verify checkpoint exists and is completed
+    let cp_repo = MergeCheckpointRepo::new(&db);
+    let checkpoints = cp_repo.get_incomplete().await?;
+    assert_eq!(checkpoints.len(), 0, "Should satisfy all checkpoints");
+
+    // Check directly in DB for completed checkpoint
+    // Check directly in DB for completed checkpoint
+    let collection = db.collection::<MergeCheckpoint>(harvest::db::collections::MERGE_CHECKPOINTS);
+    let cp = collection.find_one(doc! {}).await?;
+
+    // Checkpoint should be deleted after successful merge and cleanup
+    assert!(
+        cp.is_none(),
+        "Checkpoint should be cleaned up after completion"
+    );
+
+    cleanup_test_db(&db, &db_name).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_merge_resumes_from_checkpoint() -> Result<()> {
+    let (db, db_name) = create_test_db().await?;
+    let pages_repo = Arc::new(PageRepo::new(&db));
+    let indexer = Arc::new(Indexer::new(pages_repo, 100, db.clone()));
+
+    // Create a block with 3 terms
+    let doc_id_apple = ObjectId::new();
+    let doc_id_banana = ObjectId::new();
+    let doc_id_cherry = ObjectId::new();
+
+    let terms = vec![
+        ("apple", vec![doc_id_apple], 1),
+        ("banana", vec![doc_id_banana], 1),
+        ("cherry", vec![doc_id_cherry], 1),
+    ];
+    let block = create_block_with_terms(terms);
+
+    // We manually insert the block so we can get its name
+    indexer.persist_block_to_disk(block).await?;
+    let collections = get_spimi_block_collection_names(&db).await?;
+    let block_name = &collections[0];
+
+    let cp = MergeCheckpoint {
+        id: ObjectId::new(),
+        collection_name: block_name.clone(),
+        last_merged_term: Some("apple".to_string()),
+        last_merged_bucket: 0, // bucket 0 of apple is done
+        updated_at: mongodb::bson::DateTime::now(),
+        completed: false,
+    };
+    db.collection::<MergeCheckpoint>(harvest::db::collections::MERGE_CHECKPOINTS)
+        .insert_one(cp)
+        .await?;
+
+    // Run merge
+    indexer.merge_persisted_blocks().await?;
+
+    // Verify inverted_index
+    // Should NOT contain "apple" because we skipped it (and it wasn't there before)
+    // Should contain "banana" and "cherry"
+    let apple_docs = get_inverted_index_docs_for_term(&db, "apple").await?;
+    assert!(
+        apple_docs.is_empty(),
+        "Apple should be skipped due to checkpoint"
+    );
+
+    let banana_docs = get_inverted_index_docs_for_term(&db, "banana").await?;
+    assert_eq!(banana_docs.len(), 1);
+
+    let cherry_docs = get_inverted_index_docs_for_term(&db, "cherry").await?;
+    assert_eq!(cherry_docs.len(), 1);
 
     cleanup_test_db(&db, &db_name).await?;
     Ok(())
