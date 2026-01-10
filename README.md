@@ -2,6 +2,11 @@
 
 A full-text search engine built from scratch in Rust. Crawls the web, builds an inverted index with positional data, and supports phrase queries.
 
+
+
+https://github.com/user-attachments/assets/d070515b-c89b-48a6-9074-6ee45f7685fd
+
+
 ## What This Project Demonstrates
 
 - **Web Crawling**: Concurrent BFS crawler with configurable depth, rate limiting via semaphores, and URL deduplication
